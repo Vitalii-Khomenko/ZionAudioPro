@@ -380,6 +380,13 @@ class MainActivity : ComponentActivity() {
                         PlaybackSpeedMode.fromId(statePrefs.getInt("playback_speed_mode", PlaybackSpeedMode.MUSIC.id))
                     )
                 }
+                var playbackContentMode by remember {
+                    mutableStateOf(
+                        PlaybackContentMode.fromId(
+                            statePrefs.getInt("playback_content_mode", PlaybackContentMode.BOOKS.id)
+                        )
+                    )
+                }
                 var playlistSortMode by remember {
                     mutableStateOf(
                         PlaylistSortMode.fromId(statePrefs.getInt("playlist_sort_mode", PlaylistSortMode.NAME.id))
@@ -426,13 +433,44 @@ class MainActivity : ComponentActivity() {
 
                 // Per-track position bookmarks (key = URI hashcode)
                 fun saveTrackPosition(uri: Uri, posMs: Float) {
-                    if (posMs > 2000f)
+                    if (playbackContentMode.remembersTrackProgress && posMs > 2000f)
                         statePrefs.edit().putFloat("pos_${uri.hashCode()}", posMs).apply()
                 }
                 fun loadTrackPosition(uri: Uri): Float =
-                    statePrefs.getFloat("pos_${uri.hashCode()}", 0f)
+                    if (playbackContentMode.remembersTrackProgress) {
+                        statePrefs.getFloat("pos_${uri.hashCode()}", 0f)
+                    } else {
+                        0f
+                    }
                 fun clearTrackPosition(uri: Uri) {
-                    statePrefs.edit().remove("pos_${uri.hashCode()}").apply()
+                    if (playbackContentMode.remembersTrackProgress) {
+                        statePrefs.edit().remove("pos_${uri.hashCode()}").apply()
+                    }
+                }
+
+                fun savePausedTrackState(uri: Uri, index: Int, posMs: Float) {
+                    if (index !in playlist.indices || posMs <= 2000f) return
+                    statePrefs.edit()
+                        .putFloat("saved_position_ms", posMs)
+                        .putString("saved_position_uri", uri.toString())
+                        .putInt("current_index", index)
+                        .apply()
+                }
+
+                fun loadPausedTrackState(uri: Uri): Float {
+                    val savedUri = statePrefs.getString("saved_position_uri", null)
+                    if (savedUri != uri.toString()) return 0f
+                    return statePrefs.getFloat("saved_position_ms", 0f)
+                }
+
+                fun clearPausedTrackState(removeCurrentIndex: Boolean = false) {
+                    val editor = statePrefs.edit()
+                        .remove("saved_position_ms")
+                        .remove("saved_position_uri")
+                    if (removeCurrentIndex) {
+                        editor.remove("current_index")
+                    }
+                    editor.apply()
                 }
 
                 // Headset / audio device detection
@@ -476,6 +514,10 @@ class MainActivity : ComponentActivity() {
                     statePrefs.edit().putInt("playback_speed_mode", speedMode.id).apply()
                 }
 
+                LaunchedEffect(playbackContentMode) {
+                    statePrefs.edit().putInt("playback_content_mode", playbackContentMode.id).apply()
+                }
+
                 LaunchedEffect(playlistSortMode) {
                     statePrefs.edit().putInt("playlist_sort_mode", playlistSortMode.id).apply()
                 }
@@ -496,6 +538,7 @@ class MainActivity : ComponentActivity() {
                         ?.toSet() ?: emptySet())
                 }
                 fun markTrackPlayed(uri: Uri) {
+                    if (!playbackContentMode.showsPlayedState) return
                     val uriStr = uri.toString()
                     if (uriStr !in playedUris) {
                         playedUris = playedUris + uriStr
@@ -503,10 +546,14 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 // Derive index-set from current playlist + persisted URIs
-                val playedIndices = remember(playlist, playedUris) {
-                    playlist.indices.filter { i ->
-                        playlist[i].uri.toString() in playedUris
-                    }.toSet()
+                val playedIndices = remember(playlist, playedUris, playbackContentMode) {
+                    if (!playbackContentMode.showsPlayedState) {
+                        emptySet()
+                    } else {
+                        playlist.indices.filter { i ->
+                            playlist[i].uri.toString() in playedUris
+                        }.toSet()
+                    }
                 }
 
                 // Menu / Dialog state
@@ -777,6 +824,9 @@ class MainActivity : ComponentActivity() {
                     }
                     // Same track tapped while playing — just restart from beginning (no reload)
                     if (index == currentIndex && playbackService?.getEngine()?.isPlaying() == true) {
+                        if (!playbackContentMode.remembersTrackProgress) {
+                            clearPausedTrackState()
+                        }
                         playbackService?.getEngine()?.seekTo(0.0)
                         progressMs = 0f
                         return
@@ -792,6 +842,7 @@ class MainActivity : ComponentActivity() {
                     // Save position of the track we're leaving
                     if (currentIndex in playlist.indices && progressMs > 2000f)
                         saveTrackPosition(playlist[currentIndex].uri, progressMs)
+                    clearPausedTrackState()
                     currentIndex = index
                     isPlaying = true
                     isLoadingTrack = true
@@ -885,6 +936,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                     markTrackPlayed(playlist[currentIndex].uri)
                                     clearTrackPosition(playlist[currentIndex].uri)
+                                    clearPausedTrackState()
                                 }
                                 if (shuffleEnabled) {
                                     shuffleQueue = PlaybackShuffle.queueAfterAdvance(
@@ -905,6 +957,7 @@ class MainActivity : ComponentActivity() {
                             if (currentIndex in playlist.indices) {
                                 markTrackPlayed(playlist[currentIndex].uri)
                                 clearTrackPosition(playlist[currentIndex].uri)
+                                clearPausedTrackState()
                             }
                             val completion = if (shuffleEnabled) {
                                 val next = resolveNextIndex()
@@ -951,7 +1004,7 @@ class MainActivity : ComponentActivity() {
                                     isPlaying = false
                                     currentIndex = -1
                                     progressMs = 0f
-                                    statePrefs.edit().remove("current_index").apply()
+                                    clearPausedTrackState(removeCurrentIndex = true)
                                 }
                             }
                         }
@@ -1033,8 +1086,9 @@ class MainActivity : ComponentActivity() {
                         // to the stale saved position would cause an audible 1-second rollback.
                         if (engine.getPositionMs() < 3000.0) {
                             val trackUri = playlist.getOrNull(currentIndex)?.uri
-                            val savedPos = trackUri?.let(::loadTrackPosition)
-                                ?: statePrefs.getFloat("saved_position_ms", 0f)
+                            val savedPos = trackUri?.let { uri ->
+                                loadTrackPosition(uri).takeIf { it > 2000f } ?: loadPausedTrackState(uri)
+                            } ?: 0f
                             if (savedPos > 2000f) {
                                 delay(800) // let the engine settle after binding
                                 engine.seekTo(savedPos.toDouble())
@@ -1073,15 +1127,22 @@ class MainActivity : ComponentActivity() {
                                 if (dsr != dsdNativeRate) dsdNativeRate = dsr
 
                                 // Save position every ~5 seconds while playing (audiobook resume)
-                                if (isPlaying && progressMs > 2000f) {
+                                if (playbackContentMode.remembersTrackProgress &&
+                                    isPlaying &&
+                                    currentIndex in playlist.indices &&
+                                    progressMs > 2000f
+                                ) {
                                     saveCounter++
                                     if (saveCounter >= 10) { // 10 × 500ms = 5s
                                         saveCounter = 0
-                                        statePrefs.edit()
-                                            .putFloat("saved_position_ms", progressMs)
-                                            .putInt("current_index", currentIndex)
-                                            .apply()
+                                        savePausedTrackState(
+                                            uri = playlist[currentIndex].uri,
+                                            index = currentIndex,
+                                            posMs = progressMs,
+                                        )
                                     }
+                                } else {
+                                    saveCounter = 0
                                 }
                             }
                         }
@@ -1321,10 +1382,7 @@ class MainActivity : ComponentActivity() {
                                                                 shuffleHistory = emptyList()
                                                                 shuffleQueue = emptyList()
                                                                 savePlaylistToPrefs(sorted)
-                                                                statePrefs.edit()
-                                                                    .remove("current_index")
-                                                                    .remove("saved_position_ms")
-                                                                    .apply()
+                                                                clearPausedTrackState(removeCurrentIndex = true)
                                                                 Toast.makeText(
                                                                     this@MainActivity,
                                                                     if (skippedCount > 0) {
@@ -1550,10 +1608,7 @@ class MainActivity : ComponentActivity() {
                                     shuffleHistory = emptyList()
                                     shuffleQueue = emptyList()
                                     savePlaylistToPrefs(sorted)
-                                    statePrefs.edit()
-                                        .remove("current_index")
-                                        .remove("saved_position_ms")
-                                        .apply()
+                                    clearPausedTrackState(removeCurrentIndex = true)
                                     Toast.makeText(this@MainActivity, "Found ${sorted.size} tracks", Toast.LENGTH_SHORT).show()
                                 }
                             },
@@ -1589,6 +1644,7 @@ class MainActivity : ComponentActivity() {
                             durationMs = durationMs,
                             speedMult = speedMult,
                             speedMode = speedMode,
+                            playbackContentMode = playbackContentMode,
                             volume = volume,
                             currentIndex = currentIndex,
                             playlistSize = playlist.size,
@@ -1605,12 +1661,16 @@ class MainActivity : ComponentActivity() {
                                             playbackService?.pausePlayback()
                                         }
                                     }
-                                    statePrefs.edit()
-                                        .putFloat("saved_position_ms", progressMs)
-                                        .putInt("current_index", currentIndex)
-                                        .apply()
+                                    if (currentIndex in playlist.indices && progressMs > 2000f) {
+                                        val currentUri = playlist[currentIndex].uri
+                                        saveTrackPosition(currentUri, progressMs)
+                                        savePausedTrackState(currentUri, currentIndex, progressMs)
+                                    }
                                 } else if (currentTrack != null) {
                                     isPlaying = true
+                                    if (!playbackContentMode.remembersTrackProgress) {
+                                        clearPausedTrackState()
+                                    }
                                     if (isBound) {
                                         playbackService?.resumePlayback()
                                     } else {
@@ -1627,9 +1687,13 @@ class MainActivity : ComponentActivity() {
                                 if (currentIndex in playlist.indices && progressMs > 2000f) {
                                     saveTrackPosition(playlist[currentIndex].uri, progressMs)
                                 }
+                                clearPausedTrackState()
                                 if (isBound) playbackService?.stopPlayback()
                                 isPlaying = false
                                 progressMs = 0f
+                            },
+                            onPlaybackContentModeChanged = { newMode ->
+                                playbackContentMode = newMode
                             },
                             repeatMode = repeatMode,
                             onRepeatModeChange = { repeatMode = (repeatMode + 1) % 3 },
@@ -1687,11 +1751,8 @@ class MainActivity : ComponentActivity() {
                                 progressMs = 0f
                                 playedUris = emptySet()
                                 prefs.edit().remove("played_uris").apply()
-                                statePrefs.edit()
-                                    .remove("playlist_json")
-                                    .remove("current_index")
-                                    .remove("saved_position_ms")
-                                    .apply()
+                                statePrefs.edit().remove("playlist_json").apply()
+                                clearPausedTrackState(removeCurrentIndex = true)
                             },
                             onSelectTrack = { index -> playAtIndex(index) }
                         )

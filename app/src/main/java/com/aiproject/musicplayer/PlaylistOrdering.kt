@@ -4,6 +4,7 @@ import java.util.Locale
 
 object PlaylistOrdering {
     private val numberRegex = Regex("\\d+")
+    private val leadingNumericPrefixRegex = Regex("^(?:\\d+\\s*)+")
 
     fun sortTracks(tracks: List<AudioTrack>, mode: PlaylistSortMode): List<AudioTrack> {
         if (tracks.size < 2) return tracks
@@ -71,7 +72,7 @@ object PlaylistOrdering {
     }
 
     fun naturalSortKey(name: String): NameSortKey {
-        val normalized = normalizeName(name)
+        val normalized = normalizeNameForAlphabeticalSort(name)
         val tokens = mutableListOf<NaturalToken>()
         var lastIndex = 0
         numberRegex.findAll(normalized).forEach { match ->
@@ -105,9 +106,14 @@ object PlaylistOrdering {
         val withoutExtension = name.substringBeforeLast('.', name)
         return withoutExtension
             .lowercase(Locale.ROOT)
-            .replace('_', ' ')
-            .replace('-', ' ')
+            .replace(Regex("[^\\p{L}\\p{Nd}]+"), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
+    }
+
+    private fun normalizeNameForAlphabeticalSort(name: String): String {
+        val normalized = normalizeName(name)
+        val withoutPrefix = normalized.replace(leadingNumericPrefixRegex, "").trim()
+        return withoutPrefix.ifBlank { normalized }
     }
 }

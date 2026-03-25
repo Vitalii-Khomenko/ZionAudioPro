@@ -282,6 +282,7 @@ fun PlayerCardSection(
     durationMs: Float,
     speedMult: Float,
     speedMode: PlaybackSpeedMode,
+    playbackContentMode: PlaybackContentMode,
     volume: Float,
     currentIndex: Int,
     playlistSize: Int,
@@ -298,6 +299,7 @@ fun PlayerCardSection(
     onSeekFinished: () -> Unit,
     onSpeedChanged: (Float) -> Unit,
     onSpeedModeChanged: (PlaybackSpeedMode) -> Unit,
+    onPlaybackContentModeChanged: (PlaybackContentMode) -> Unit,
     onSpeedReset: () -> Unit,
     onVolumeChanged: (Float) -> Unit,
 ) {
@@ -461,6 +463,60 @@ fun PlayerCardSection(
                         modifier = Modifier.size(22.dp),
                         tint = if (repeatMode > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
                     )
+                }
+            }
+
+            Spacer(Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "Mode: ${playbackContentMode.label}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Surface(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(999.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        PlaybackContentMode.entries.forEach { mode ->
+                            val selected = mode == playbackContentMode
+                            Surface(
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(999.dp),
+                                color = if (selected) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    Color.Transparent
+                                }
+                            ) {
+                                TextButton(
+                                    onClick = { onPlaybackContentModeChanged(mode) },
+                                    contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(30.dp).fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = mode.label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (selected) {
+                                            MaterialTheme.colorScheme.onPrimary
+                                        } else {
+                                            LocalContentColor.current
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
 

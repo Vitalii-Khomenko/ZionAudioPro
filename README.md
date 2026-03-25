@@ -23,7 +23,7 @@ HiFi Player is built differently, from the ground up:
 | **UI freeze on load** | Common — file scan blocks main thread | **IO coroutine + Mutex** — UI never freezes, even on large FLAC files |
 | **Bit depth** | Downsampled to 16-bit by Android mixer | **32-bit float output** to Oboe, preserving full dynamic range |
 | **EQ** | None, or basic preset-only | **User-adjustable 5-band EQ** — native RBJ shelves/peaks with persisted settings |
-| **USB DAC** | Not supported | **Architecture ready** — UsbAudioEndpoint stub for direct isochronous transfer to USB DAC, bypassing Android's 48 kHz mixer entirely |
+| **USB DAC** | Not supported | Not implemented |
 | **Output device detection** | Not shown | **Live headset info** — shows device name, connection type (USB / Bluetooth A2DP / Wired), max supported sample rate and bit depth |
 | **Playback speed** | None or MediaPlayer-based (degrades quality) | **Native Sonic time-stretch** in the custom C++ decode loop |
 | **Repeat modes** | Basic | Off / Repeat One / Repeat All with per-track bookmark preservation |
@@ -71,6 +71,7 @@ Android's standard `AudioTrack` has 20–50 ms latency and introduces its own re
 ### Playback & UX
 - **Smooth track transitions** — silence-first transition: fade target to zero → load / seek at mute → short preroll → native ramp-up, no audible clicks
 - **Samsung-friendly de-clicking** — transport ramps and preroll windows were lengthened, and native edge ramps were extended to better suppress paper-pop artifacts during Stop / Next / track switches on devices like Galaxy A55
+- **Playback mode switch** — `Books` keeps per-track resume positions and completed-chapter markers; `Music` disables long-term track memory and keeps only the current paused position for quick resume
 - **Same-track re-tap** — tapping the currently playing track seeks instantly to the beginning with no decoder reload
 - **Position restore guard** — returning to the app after it was backgrounded never causes a seek-back glitch; position is only restored from saved state if the engine is freshly loaded (< 3 s in)
 - **URI-precise restore** — current track restore matches by exact `Uri`, not just title, so duplicate filenames from different folders restore correctly
@@ -83,7 +84,7 @@ Android's standard `AudioTrack` has 20–50 ms latency and introduces its own re
 - **Equalizer** — top-bar Equalizer dialog with on/off toggle, 5 bands, reset-to-flat, and instant live updates while playback continues
 - **Sleep timer** — 5 / 10 / 15 / 30 / 60 minutes with 30-second volume fade-out; battery-optimised (CPU only woken in final 30-second window, not every 500 ms for the entire duration); expiry now performs only a minimal final pause fade in `PlaybackService`, avoiding a second long fade after the countdown already reached silence; active timer is shown as a high-contrast chip that stays readable in dark theme
 - **Playlist summary** — header now shows track count and total playlist duration when metadata is available
-- **Playlist sorting** — manual sort by plain name or by detected chapter/file numbers; numeric mode recognizes digits anywhere in the filename, including prefixes, middles, and suffixes
+- **Playlist sorting** — manual sort by plain name or by detected chapter/file numbers; `Name` ignores leading prefixes like `01 - Intro`, while `Number` recognizes digits anywhere in the filename
 
 ### Audiobook Features
 - **Per-track position bookmarks** — every track independently remembers where you stopped; switching chapters and returning resumes at the exact second
@@ -176,12 +177,6 @@ Android's standard `AudioTrack` has 20–50 ms latency and introduces its own re
 │  Persistent stream  ·  double→float  ·  silence on underrun   │
 │  Hardware-native sample rate  ·  ~1–5 ms latency              │
 │  Auto-reconnect on ErrorDisconnected (routing change)         │
-└──────────────────────────────────────────────────────────────┘
-                         │ (future)
-┌────────────────────────▼─────────────────────────────────────┐
-│                  UsbAudioEndpoint (stub)                      │
-│  Direct isochronous USB transfer  ·  bypasses Android mixer   │
-│  Raw PCM / DoP to external DAC  ·  192 kHz / 32-bit capable   │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -328,8 +323,7 @@ MusicPlayerPro/
     │   └── BiquadFilter.h         # All 7 RBJ EQ Cookbook filter types
     ├── hw/
     │   ├── IAudioEndpoint.h       # Abstract output: initialize · write · terminate
-    │   ├── OboeAudioEndpoint.h    # Persistent stream · auto-reconnect · lifetime-safe thread
-    │   └── UsbAudioEndpoint.h     # USB DAC stub — isochronous transfer architecture
+    │   └── OboeAudioEndpoint.h    # Persistent stream · auto-reconnect · lifetime-safe thread
     └── jni/
         └── audio_engine_jni.cpp   # JNI bridge: fd-based loading · play/pause/seek/speed
 ```
@@ -338,25 +332,16 @@ MusicPlayerPro/
 
 ## Unit Test Suite
 
-Critical logic is covered by **109 pure-JVM unit tests** that run without a device or emulator:
+Critical logic is covered by pure-JVM unit tests that run without a device or emulator:
 
 ```bash
 ./gradlew test          # ~15 seconds, no device needed
 ```
 
-| Test class | Tests | What it guards |
-|---|---|---|
-| `PlaybackStateMachineTest` | 22 | Audio focus state machine — every bug from production is a named test |
-| `PlaylistNavigatorTest` | 18 | Repeat off/one/all · next/prev · boundary conditions · single-track edge cases |
-| `PlaybackQueueFlowTest` | 9 | Repeat-aware next-track selection and completion decisions for gapless preloading / auto-advance |
-| `PlaybackRestoreTest` | 3 | Exact restore by `Uri`; protects duplicate-title playlists from restoring the wrong track |
-| `PlaybackSpeedTest` | 5 | Speed-range clamping and preset snapping used by the UI/native speed path |
-| `PlaybackShuffleTest` | 10 | Shuffle queue construction, preview stability, repeat-all queue rebuild, and history-backed Previous |
-| `PlaybackTransitionsTest` | 5 | Regression coverage for user-pause, sleep-timer, and stop/switch/focus timing policy |
-| `PlaylistSummaryTest` | 3 | Playlist count aggregation and total-duration formatting |
-| `PlaylistMergeTest` | 3 | Prevents duplicate track insertion when importing folders or DLNA tracks |
-| `VolumeRampTest` | 18 | Fade-in ends at target · fade-out ends at 0 · duck math · crossfade contract |
-| `DsdInfoTest` | 13 | DSD64/128/256/512 label correctness · boundary rates · `isDsd()` helper |
+- `PlaybackStateMachineTest`, `PlaybackTransitionsTest`, `VolumeRampTest` — transport, fade, and audio-focus regressions
+- `PlaylistNavigatorTest`, `PlaybackQueueFlowTest`, `PlaybackShuffleTest`, `PlaylistMergeTest`, `PlaylistSummaryTest`, `PlaylistOrderingTest` — playlist behavior, sorting, queueing, and deduplication
+- `PlaybackRestoreTest`, `PlaybackContentModeTest`, `LibraryFolderEntryTest` — restore rules, `Music` / `Books` mode semantics, and library-folder persistence
+- `PlaybackSpeedTest`, `PlaybackSpeedModeTest`, `DsdInfoTest` — speed clamps, speed modes, and DSD label correctness
 
 ### Named regression tests (bugs that already happened)
 
@@ -479,20 +464,17 @@ Then update the four `KEYSTORE_*` lines in `local.properties`.
 
 ## Roadmap
 
-- [x] **Full DSD playback** — DSF (.dsf) and DSDIFF (.dff) file decoding; 16× decimation box filter converts DSD64 → 176.4 kHz PCM / DSD128 → 352.8 kHz PCM; DoP-rate output ensures bit-transparency on USB DACs; DSD badge (DSD64/DSD128/DSD256/DSD512) shown in player UI
-- [x] **Bluetooth codec detection** — connects to `BluetoothA2dp` profile proxy at runtime; reads active codec (LDAC / aptX HD / aptX / AAC / SBC) and displays it in the headset info bar
-- [x] **Gapless playback** — `m_nextDecoder` slot in `AudioPlayer`; pre-loaded ~8 s before EOF; seamless C++ decoder swap with zero stream interruption
-- [x] **ReplayGain** — scans first 64 KB of FLAC/MP3 for `REPLAYGAIN_TRACK_GAIN` tag; applied automatically; displayed as `±X.X dB`
-- [x] **Spectrum analyzer** — 2048-point Hann-windowed FFT; 32 logarithmic bands; 30 fps with smooth decay on pause
-- [x] **DLNA / UPnP network source** — SSDP M-SEARCH discovers MediaServer:1 devices; ContentDirectory:Browse SOAP fetches audio track listings; HTTP streaming with safe cache
-- [x] **Audio focus state machine** — full fade-out/in lifecycle for mic, calls, notifications, other players
-- [x] **Oboe auto-reconnect** — survives headphone unplug, BT switch, screen recording
-- [x] **Battery optimisation** — no wake locks; decode loop uses back-pressure sleep; sleep timer wakes CPU only in the final 30-second fade window
-- [x] **Security & stability hardening** — JNI shutdown race, Oboe reconnect use-after-free, state restore ambiguity, sleep-timer state desync, data race (spectrum), Activity memory leak, DLNA cache corruption — all fixed
-- [x] **Fast start / resume** — preroll reduced to 20 ms; silent preroll already buffered in the native ring buffer is cleared before unmute, so first audio becomes audible faster
-- [x] **Transport robustness** — `Stop -> Next/Play` now survives temporary service disconnects by rebinding and replaying the pending action in `MainActivity`
-- [x] **Speed-path stabilization** — unstable experimental overlap/crossfade stretch removed; playback speed now uses a stable native streaming resampler to avoid freezes, tearing, and heavy crackle on real devices
-- [x] **Xiaomi lock-screen resilience** — Oboe reconnect path hardened against nested-lock stream teardown during device-change recovery
+Current approach is simple: this file describes what is already in the app. New work is added step by step after implementation and validation.
+
+- [x] Native Oboe playback engine with gapless decoder handoff
+- [x] FLAC / MP3 / WAV / DSD playback
+- [x] ReplayGain, 5-band EQ, and Sonic-based speed control
+- [x] Shuffle, repeat, sleep timer, and lock-screen controls
+- [x] `Books` / `Music` playback modes
+- [x] Playlist save/load, Library Folders manager, and in-app folder browsing
+- [x] MediaStore scan and DLNA browsing
+- [x] Device-output info and Bluetooth codec display
+- [x] Real-device stability fixes around audio focus, reconnect, and transport flow
 
 ---
 

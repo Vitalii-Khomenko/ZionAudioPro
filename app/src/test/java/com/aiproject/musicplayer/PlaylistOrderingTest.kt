@@ -47,6 +47,26 @@ class PlaylistOrderingTest {
     }
 
     @Test
+    fun `name sort ignores leading numeric prefixes`() {
+        val sorted = listOf(
+            "02 - Banana.mp3",
+            "10 - Cherry.mp3",
+            "01 - Apple.mp3",
+        ).sortedBy {
+            PlaylistOrdering.naturalSortKey(it)
+        }
+
+        assertEquals(
+            listOf(
+                "01 - Apple.mp3",
+                "02 - Banana.mp3",
+                "10 - Cherry.mp3",
+            ),
+            sorted
+        )
+    }
+
+    @Test
     fun `number sort keeps non-number tracks after numbered ones`() {
         val sorted = listOf(
             "preface.mp3",
