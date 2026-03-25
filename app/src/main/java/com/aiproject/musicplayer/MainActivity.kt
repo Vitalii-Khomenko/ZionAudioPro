@@ -515,10 +515,16 @@ class MainActivity : ComponentActivity() {
                 var playlistName by remember { mutableStateOf("") }
                 var showLoadPlaylist by remember { mutableStateOf(false) }
                 var showLibraryFolders by remember { mutableStateOf(false) }
+                var showBrowseLibraryFolder by remember { mutableStateOf(false) }
                 var showSleepTimer by remember { mutableStateOf(false) }
                 var showEqualizer by remember { mutableStateOf(false) }
                 var sleepTimerEndMs by remember { mutableLongStateOf(0L) }
                 var sleepTimerDisplay by remember { mutableStateOf("") }
+                var browsingLibraryRoot by remember { mutableStateOf<LibraryFolderEntry?>(null) }
+                var libraryBrowseStack by remember { mutableStateOf<List<LibraryBrowseLocation>>(emptyList()) }
+                var libraryBrowserEntries by remember { mutableStateOf<List<LibraryBrowserEntry>>(emptyList()) }
+                var libraryBrowserLoading by remember { mutableStateOf(false) }
+                var libraryBrowserErrorMessage by remember { mutableStateOf<String?>(null) }
 
                 fun applyEqSettings() {
                     val service = playbackService ?: return
@@ -547,6 +553,28 @@ class MainActivity : ComponentActivity() {
                         uriString = folderUri.toString(),
                         label = folderNameFromTreeUri(folderUri)
                     )
+                }
+
+                fun loadLibraryBrowserLocation(rootEntry: LibraryFolderEntry, stack: List<LibraryBrowseLocation>) {
+                    val location = stack.lastOrNull() ?: return
+                    libraryBrowserLoading = true
+                    libraryBrowserErrorMessage = null
+                    lifecycleScope.launch {
+                        try {
+                            libraryBrowserEntries = withContext(Dispatchers.IO) {
+                                listLibraryFolderChildren(
+                                    treeUri = Uri.parse(rootEntry.uriString),
+                                    docId = location.documentId,
+                                    folderLabel = location.label,
+                                )
+                            }
+                        } catch (e: Exception) {
+                            libraryBrowserEntries = emptyList()
+                            libraryBrowserErrorMessage = e.message ?: "Failed to browse ${location.label}"
+                        } finally {
+                            libraryBrowserLoading = false
+                        }
+                    }
                 }
 
                 fun cancelSleepTimer() {
@@ -601,6 +629,75 @@ class MainActivity : ComponentActivity() {
                     } catch (_: Exception) {
                     }
                     libraryFolders = libraryFolders.filterNot { it.uriString == entry.uriString }
+                }
+
+                fun openLibraryFolderBrowser(entry: LibraryFolderEntry) {
+                    if (entry !in availableLibraryFolders(listOf(entry))) {
+                        Toast.makeText(
+                            applicationContext,
+                            "Access lost for ${entry.label}. Re-add this folder.",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        return
+                    }
+                    val rootUri = Uri.parse(entry.uriString)
+                    val rootLocation = LibraryBrowseLocation(
+                        documentId = DocumentsContract.getTreeDocumentId(rootUri),
+                        label = entry.label
+                    )
+                    browsingLibraryRoot = entry
+                    libraryBrowseStack = listOf(rootLocation)
+                    showBrowseLibraryFolder = true
+                    loadLibraryBrowserLocation(entry, listOf(rootLocation))
+                }
+
+                fun navigateIntoLibraryFolder(browserEntry: LibraryBrowserEntry) {
+                    val rootEntry = browsingLibraryRoot ?: return
+                    if (!browserEntry.isDirectory) return
+                    val nextStack = libraryBrowseStack + LibraryBrowseLocation(
+                        documentId = browserEntry.documentId,
+                        label = browserEntry.name
+                    )
+                    libraryBrowseStack = nextStack
+                    loadLibraryBrowserLocation(rootEntry, nextStack)
+                }
+
+                fun navigateUpLibraryFolder() {
+                    val rootEntry = browsingLibraryRoot ?: return
+                    if (libraryBrowseStack.size <= 1) return
+                    val nextStack = libraryBrowseStack.dropLast(1)
+                    libraryBrowseStack = nextStack
+                    loadLibraryBrowserLocation(rootEntry, nextStack)
+                }
+
+                fun addCurrentLibraryFolderToPlaylist() {
+                    val rootEntry = browsingLibraryRoot ?: return
+                    val currentLocation = libraryBrowseStack.lastOrNull() ?: return
+                    lifecycleScope.launch {
+                        val newTracks = withContext(Dispatchers.IO) {
+                            loadTracksFromTree(
+                                treeUri = Uri.parse(rootEntry.uriString),
+                                docId = currentLocation.documentId,
+                                folderLabel = currentLocation.label,
+                            )
+                        }
+                        val addedCount = addTracksToPlaylist(newTracks)
+                        Toast.makeText(
+                            applicationContext,
+                            "Added $addedCount tracks from ${currentLocation.label}",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+
+                fun addLibraryTrackToPlaylist(browserEntry: LibraryBrowserEntry) {
+                    val track = browserEntry.track ?: return
+                    val addedCount = addTracksToPlaylist(listOf(track))
+                    Toast.makeText(
+                        applicationContext,
+                        if (addedCount > 0) "Added: ${track.name}" else "Track already in playlist",
+                        Toast.LENGTH_SHORT
+                    ).show()
                 }
 
                 fun resolveNextIndex(): Int {
@@ -1407,7 +1504,29 @@ class MainActivity : ComponentActivity() {
                     availableFolderUris = availableLibraryFolderUris,
                     onDismiss = { showLibraryFolders = false },
                     onAddFolder = { libraryFolderPickerLauncher.launch(null) },
+                    onBrowseFolder = { entry -> openLibraryFolderBrowser(entry) },
                     onRemoveFolder = { entry -> removeLibraryFolder(entry) }
+                )
+
+                BrowseLibraryFolderDialog(
+                    show = showBrowseLibraryFolder,
+                    rootLabel = browsingLibraryRoot?.label.orEmpty(),
+                    currentPath = libraryBrowseStack.map { it.label },
+                    entries = libraryBrowserEntries,
+                    loading = libraryBrowserLoading,
+                    errorMessage = libraryBrowserErrorMessage,
+                    canNavigateUp = libraryBrowseStack.size > 1,
+                    onDismiss = {
+                        showBrowseLibraryFolder = false
+                        browsingLibraryRoot = null
+                        libraryBrowseStack = emptyList()
+                        libraryBrowserEntries = emptyList()
+                        libraryBrowserErrorMessage = null
+                    },
+                    onNavigateUp = { navigateUpLibraryFolder() },
+                    onOpenFolder = { entry -> navigateIntoLibraryFolder(entry) },
+                    onAddCurrentFolder = { addCurrentLibraryFolderToPlaylist() },
+                    onAddTrack = { entry -> addLibraryTrackToPlaylist(entry) }
                 )
 
                 // --- Main UI ---
@@ -1665,6 +1784,65 @@ class MainActivity : ComponentActivity() {
             e.printStackTrace()
         }
         return result
+    }
+
+    private fun listLibraryFolderChildren(
+        treeUri: Uri,
+        docId: String,
+        folderLabel: String,
+    ): List<LibraryBrowserEntry> {
+        val result = mutableListOf<LibraryBrowserEntry>()
+        try {
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
+            contentResolver.query(
+                childrenUri,
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE
+                ), null, null, null
+            )?.use { cursor ->
+                val idCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val nameCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                val mimeCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                while (cursor.moveToNext()) {
+                    val childId = cursor.getString(idCol) ?: continue
+                    val name = cursor.getString(nameCol) ?: ""
+                    val mime = cursor.getString(mimeCol) ?: ""
+                    when {
+                        mime == DocumentsContract.Document.MIME_TYPE_DIR -> {
+                            result.add(
+                                LibraryBrowserEntry(
+                                    documentId = childId,
+                                    name = name,
+                                    isDirectory = true,
+                                )
+                            )
+                        }
+                        mime.startsWith("audio/") ||
+                            name.endsWith(".dsf", ignoreCase = true) ||
+                            name.endsWith(".dff", ignoreCase = true) -> {
+                            val fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, childId)
+                            result.add(
+                                LibraryBrowserEntry(
+                                    documentId = childId,
+                                    name = name,
+                                    isDirectory = false,
+                                    track = AudioTrack(fileUri, name, folderLabel, 0L)
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            throw e
+        }
+        return result.sortedWith(
+            compareBy<LibraryBrowserEntry> { !it.isDirectory }
+                .thenBy { it.name.lowercase() }
+        )
     }
 
     private fun scanMediaStore(): List<AudioTrack> {

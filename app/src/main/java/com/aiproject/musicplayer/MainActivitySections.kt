@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.BluetoothConnected
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -811,6 +812,7 @@ fun LibraryFoldersDialog(
     availableFolderUris: Set<String>,
     onDismiss: () -> Unit,
     onAddFolder: () -> Unit,
+    onBrowseFolder: (LibraryFolderEntry) -> Unit,
     onRemoveFolder: (LibraryFolderEntry) -> Unit,
 ) {
     if (!show) return
@@ -868,6 +870,16 @@ fun LibraryFoldersDialog(
                                     )
                                 }
                                 IconButton(
+                                    onClick = { onBrowseFolder(folder) },
+                                    enabled = hasAccess
+                                ) {
+                                    Icon(
+                                        Icons.Filled.LibraryMusic,
+                                        contentDescription = "Browse folder",
+                                        tint = if (hasAccess) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                IconButton(
                                     onClick = { onRemoveFolder(folder) },
                                     enabled = true
                                 ) {
@@ -889,6 +901,120 @@ fun LibraryFoldersDialog(
         },
         dismissButton = {
             TextButton(onClick = onAddFolder) { Text("Add Folder") }
+        }
+    )
+}
+
+@Composable
+fun BrowseLibraryFolderDialog(
+    show: Boolean,
+    rootLabel: String,
+    currentPath: List<String>,
+    entries: List<LibraryBrowserEntry>,
+    loading: Boolean,
+    errorMessage: String?,
+    canNavigateUp: Boolean,
+    onDismiss: () -> Unit,
+    onNavigateUp: () -> Unit,
+    onOpenFolder: (LibraryBrowserEntry) -> Unit,
+    onAddCurrentFolder: () -> Unit,
+    onAddTrack: (LibraryBrowserEntry) -> Unit,
+) {
+    if (!show) return
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (rootLabel.isNotBlank()) "Browse $rootLabel" else "Browse Library Folder") },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "Navigate inside the authorized folder, then explicitly add the current folder or an individual track to the playlist.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                if (currentPath.isNotEmpty()) {
+                    Text(
+                        currentPath.joinToString(" > "),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (canNavigateUp) {
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(onClick = onNavigateUp) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Up")
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                when {
+                    loading -> {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(12.dp))
+                            Text("Loading folder…", style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                    errorMessage != null -> {
+                        Text(
+                            errorMessage,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    entries.isEmpty() -> {
+                        Text(
+                            "No subfolders or audio files found here.",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    else -> {
+                        LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
+                            itemsIndexed(entries) { _, entry ->
+                                ListItem(
+                                    headlineContent = {
+                                        Text(entry.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    },
+                                    supportingContent = {
+                                        Text(
+                                            if (entry.isDirectory) "Open folder" else "Tap to add this track to the playlist",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    },
+                                    leadingContent = {
+                                        Icon(
+                                            imageVector = if (entry.isDirectory) Icons.Filled.FolderOpen else Icons.Filled.PlayArrow,
+                                            contentDescription = null,
+                                            tint = if (entry.isDirectory) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
+                                        )
+                                    },
+                                    modifier = Modifier.clickable {
+                                        if (entry.isDirectory) {
+                                            onOpenFolder(entry)
+                                        } else {
+                                            onAddTrack(entry)
+                                        }
+                                    }
+                                )
+                                HorizontalDivider(thickness = 0.5.dp)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        },
+        dismissButton = {
+            TextButton(onClick = onAddCurrentFolder, enabled = !loading && errorMessage == null) {
+                Text("Add Folder To Playlist")
+            }
         }
     )
 }

@@ -45,6 +45,7 @@ Current architectural baseline:
 - [x] MediaStore import
 - [x] Recursive SAF folder scanning
 - [x] Separate app-level Library Folders manager with independent SAF-root persistence and no automatic playlist rebuild from those access roots
+- [x] In-app browsing inside already-authorized Library Folders, with explicit add-to-playlist from the chosen subfolder or track
 - [x] Room-backed named playlists
 - [x] DLNA / UPnP browse and add-to-playlist flow
 - [x] Safe DLNA caching to temp file before commit

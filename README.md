@@ -140,7 +140,7 @@ Android's standard `AudioTrack` has 20–50 ms latency and introduces its own re
 
 ### Playlist Management
 - **Add Folder** — grant persistent URI permission once to a root folder; **all subfolders are scanned recursively** (up to 10 levels deep) and added automatically — one permission tap covers your entire music library
-- **Library Folders manager** — top-bar menu stores and removes persistent SAF root access independently from playlist actions
+- **Library Folders manager** — top-bar menu stores and removes persistent SAF root access independently from playlist actions, and now lets you browse already-authorized roots before explicitly adding a chosen subfolder or track to the playlist
 - **Scan MediaStore** — discover all audio files on the device
 - **Sort by Name / Number** — playlist menu can resort tracks alphabetically or by parsed numeric tokens from filenames such as `01 Intro`, `Chapter 12`, or `Part_7_Final`
 - **Save / Load / Rename / Delete** playlists — backed by Room SQLite database, preserving folder label, cached duration metadata, and shuffle-enabled state
