@@ -1,4 +1,6 @@
 package com.aiproject.musicplayer
+
+import android.content.pm.PackageManager
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -79,6 +81,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -101,8 +104,26 @@ fun MainTopBar(
     onShowEqualizer: () -> Unit,
     onOpenDlna: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val versionName = remember(context) {
+        try {
+            val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+            packageInfo.versionName ?: "0.0.0"
+        } catch (_: PackageManager.NameNotFoundException) {
+            "0.0.0"
+        }
+    }
     TopAppBar(
-        title = { Text("HiFi Player") },
+        title = {
+            Column(verticalArrangement = Arrangement.Center) {
+                Text("HiFi Player")
+                Text(
+                    text = "v$versionName",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
         actions = {
             if (sleepTimerDisplay.isNotEmpty()) {
                 Surface(
