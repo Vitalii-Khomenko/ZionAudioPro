@@ -1,5 +1,6 @@
 {
     "C_Cpp.default.compilerPath": "${env:LOCALAPPDATA}/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/windows-x86_64/bin/clang++.exe",
     "cmake.configureOnOpen": false,
-    "cmake.generator": "Ninja"
+    "cmake.generator": "Ninja",
+    "java.configuration.updateBuildConfiguration": "interactive"
 }

@@ -23,9 +23,11 @@ import androidx.core.app.NotificationCompat
 import androidx.media.app.NotificationCompat as MediaNotificationCompat
 import androidx.media.session.MediaButtonReceiver
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -45,6 +47,12 @@ class PlaybackService : Service() {
     private lateinit var mediaSession: MediaSessionCompat
     private lateinit var audioManager: AudioManager
     private lateinit var audioEngine: AudioEngine
+    private val engineInitMutex = Mutex()
+    private var engineInitJob: Deferred<Boolean>? = null
+    @Volatile
+    private var isAudioEngineReady = false
+    @Volatile
+    private var engineInitFailed = false
     private var audioFocusRequest: AudioFocusRequest? = null
 
     var currentTitle: String = ""
@@ -78,11 +86,11 @@ class PlaybackService : Service() {
         doDuck = { level -> handleDuck(level) },
         doRestoreVolume = { restoreFromDuck() },
         doAbandonFocus = { abandonAudioFocus() },
-        isEnginePlayingNow = { ::audioEngine.isInitialized && audioEngine.isPlaying() },
+        isEnginePlayingNow = { isAudioEngineReady && audioEngine.isPlaying() },
         hasCurrentTrack = { currentTitle.isNotEmpty() }
     )
 
-    fun getEngine(): AudioEngine = audioEngine
+    fun getEngine(): AudioEngine? = audioEngine.takeIf { isAudioEngineReady }
 
     inner class LocalBinder : Binder() {
         fun getService(): PlaybackService = this@PlaybackService
@@ -91,15 +99,15 @@ class PlaybackService : Service() {
     override fun onCreate() {
         super.onCreate()
         audioEngine = AudioEngine()
-        audioEngine.initEngine()
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         setupMediaSession()
         createNotificationChannel()
+        beginAudioEngineInitialization()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         MediaButtonReceiver.handleIntent(mediaSession, intent)
-        if (currentTitle.isNotEmpty()) showNotification(currentTitle, audioEngine.isPlaying())
+        if (currentTitle.isNotEmpty()) showNotification(currentTitle, getEngine()?.isPlaying() == true)
         return START_NOT_STICKY
     }
 
@@ -114,7 +122,9 @@ class PlaybackService : Service() {
         try { mediaSession.isActive = false } catch (_: Exception) {}
         try { mediaSession.release() } catch (_: Exception) {}
         abandonAudioFocus()
-        audioEngine.shutdownEngine()
+        if (isAudioEngineReady) {
+            audioEngine.shutdownEngine()
+        }
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -124,14 +134,56 @@ class PlaybackService : Service() {
         completionJob?.cancel()
         gaplessJob?.cancel()
         loadJob?.cancel()
-        audioEngine.clearNextTrack()
+        if (isAudioEngineReady) {
+            audioEngine.clearNextTrack()
+        }
         pendingGaplessTrack = null
-        audioEngine.pause()
+        if (isAudioEngineReady) {
+            audioEngine.pause()
+        }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     override fun onBind(intent: Intent): IBinder = binder
+
+    private fun beginAudioEngineInitialization() {
+        if (isAudioEngineReady || engineInitFailed) return
+        val existingJob = engineInitJob
+        if (existingJob != null && !existingJob.isCancelled) return
+        engineInitJob = serviceScope.async(Dispatchers.Default) {
+            initializeAudioEngineIfNeeded()
+        }
+    }
+
+    private suspend fun initializeAudioEngineIfNeeded(): Boolean {
+        if (isAudioEngineReady) return true
+        if (engineInitFailed) return false
+        return engineInitMutex.withLock {
+            if (isAudioEngineReady) return@withLock true
+            if (engineInitFailed) return@withLock false
+            try {
+                audioEngine.initEngine()
+                isAudioEngineReady = true
+                true
+            } catch (_: Throwable) {
+                engineInitFailed = true
+                false
+            }
+        }
+    }
+
+    private suspend fun awaitAudioEngineReady(): Boolean {
+        if (isAudioEngineReady) return true
+        if (engineInitFailed) return false
+        beginAudioEngineInitialization()
+        return try {
+            engineInitJob?.await() ?: initializeAudioEngineIfNeeded()
+        } catch (_: Throwable) {
+            engineInitFailed = true
+            false
+        }
+    }
 
     private fun setupMediaSession() {
         mediaSession = MediaSessionCompat(this, "MusicPlayerProSession").apply {
@@ -184,8 +236,10 @@ class PlaybackService : Service() {
         audioEngine.clearNextTrack()
         pendingGaplessTrack = null
         fadeJob = serviceScope.launch {
-            fadeOutAndPause(PlaybackTransitions.STOP_FADE_MS)
-            audioEngine.seekTo(0.0)
+            if (awaitAudioEngineReady()) {
+                fadeOutAndPause(PlaybackTransitions.STOP_FADE_MS)
+                audioEngine.seekTo(0.0)
+            }
             updatePlaybackState(PlaybackStateCompat.STATE_STOPPED)
             stopForeground(STOP_FOREGROUND_REMOVE)
         }
@@ -286,6 +340,15 @@ class PlaybackService : Service() {
         pendingGaplessTrack = null
 
         loadJob = serviceScope.launch {
+            if (!awaitAudioEngineReady()) {
+                currentTitle = ""
+                currentTrackUri = ""
+                playbackStateMachine.onUserStop()
+                syncStateFromMachine()
+                updatePlaybackState(PlaybackStateCompat.STATE_STOPPED)
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                return@launch
+            }
             if (audioEngine.isPlaying()) {
                 audioEngine.setVolume(0.0)
                 delay(PlaybackTransitions.SWITCH_FADE_MS)
@@ -412,28 +475,52 @@ class PlaybackService : Service() {
     }
 
     fun setPlaybackSpeed(speed: Double) {
-        audioEngine.setSpeed(speed)
+        serviceScope.launch {
+            if (awaitAudioEngineReady()) {
+                audioEngine.setSpeed(speed)
+            }
+        }
     }
 
     fun setPlaybackSpeedMode(mode: PlaybackSpeedMode) {
-        audioEngine.setSpeedMode(mode.id)
+        serviceScope.launch {
+            if (awaitAudioEngineReady()) {
+                audioEngine.setSpeedMode(mode.id)
+            }
+        }
     }
 
     fun setEqEnabled(enabled: Boolean) {
-        audioEngine.setEqEnabled(enabled)
+        serviceScope.launch {
+            if (awaitAudioEngineReady()) {
+                audioEngine.setEqEnabled(enabled)
+            }
+        }
     }
 
     fun setEqBandGain(bandIndex: Int, gainDb: Double) {
-        audioEngine.setEqBandGain(bandIndex, gainDb)
+        serviceScope.launch {
+            if (awaitAudioEngineReady()) {
+                audioEngine.setEqBandGain(bandIndex, gainDb)
+            }
+        }
     }
 
     fun resetEqBands() {
-        audioEngine.resetEqBands()
+        serviceScope.launch {
+            if (awaitAudioEngineReady()) {
+                audioEngine.resetEqBands()
+            }
+        }
     }
 
     fun setVolume(volume: Double) {
         currentVolume = volume
-        audioEngine.setVolume(volume)
+        serviceScope.launch {
+            if (awaitAudioEngineReady()) {
+                audioEngine.setVolume(volume)
+            }
+        }
     }
 
     fun pauseForSleepTimer() {
@@ -489,7 +576,11 @@ class PlaybackService : Service() {
 
     private fun updatePlaybackState(state: Int) {
         if (!mediaSession.isActive) return
-        val positionMs = try { audioEngine.getPositionMs().toLong() } catch (_: Exception) { 0L }
+        val positionMs = if (isAudioEngineReady) {
+            try { audioEngine.getPositionMs().toLong() } catch (_: Exception) { 0L }
+        } else {
+            0L
+        }
         val speed = if (state == PlaybackStateCompat.STATE_PLAYING) 1.0f else 0.0f
         try {
             mediaSession.setPlaybackState(
