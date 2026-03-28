@@ -28,3 +28,4 @@ This roadmap now reflects only what is already implemented and the current produ
 - JVM tests must stay green.
 - Release build must stay green.
 - New playback changes must be manually checked on real Android hardware before being treated as stable.
+- Every code change must also bump the Android app version. See [copilot-instructions.md](copilot-instructions.md).

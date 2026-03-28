@@ -57,6 +57,7 @@ import java.net.InetAddress
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -242,9 +243,21 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun bindPlaybackServiceIfRunning() {
+        if (isBound) return
+        Intent(this, PlaybackService::class.java).also { intent ->
+            try {
+                bindService(intent, connection, 0)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     override fun onStart() {
         super.onStart()
-        ensurePlaybackServiceConnection()
+        if (!isFinishing && !isDestroyed) {
+            bindPlaybackServiceIfRunning()
+        }
     }
 
     override fun onDestroy() {
@@ -364,8 +377,43 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                data class StartupRestoreSnapshot(
+                    val playlist: List<AudioTrack>,
+                    val speedMode: PlaybackSpeedMode,
+                    val playbackContentMode: PlaybackContentMode,
+                    val playlistSortMode: PlaylistSortMode,
+                    val eqSettings: EqSettings,
+                    val shuffleEnabled: Boolean,
+                    val shuffleHistory: List<Int>,
+                    val shuffleQueue: List<Int>,
+                    val libraryFolders: List<LibraryFolderEntry>,
+                )
+
+                fun loadStartupRestoreSnapshot(): StartupRestoreSnapshot {
+                    return StartupRestoreSnapshot(
+                        playlist = loadPlaylistFromPrefs(),
+                        speedMode = PlaybackSpeedMode.fromId(
+                            statePrefs.getInt("playback_speed_mode", PlaybackSpeedMode.MUSIC.id)
+                        ),
+                        playbackContentMode = PlaybackContentMode.fromId(
+                            statePrefs.getInt("playback_content_mode", PlaybackContentMode.BOOKS.id)
+                        ),
+                        playlistSortMode = PlaylistSortMode.fromId(
+                            statePrefs.getInt("playlist_sort_mode", PlaylistSortMode.NAME.id)
+                        ),
+                        eqSettings = EqSettings.deserialize(
+                            enabled = statePrefs.getBoolean("eq_enabled", false),
+                            serialized = statePrefs.getString("eq_gains", null)
+                        ),
+                        shuffleEnabled = statePrefs.getBoolean("shuffle_enabled", false),
+                        shuffleHistory = loadIntListFromPrefs("shuffle_history_json"),
+                        shuffleQueue = loadIntListFromPrefs("shuffle_queue_json"),
+                        libraryFolders = loadLibraryFoldersFromPrefs(),
+                    )
+                }
+
                 // --- State ---
-                var playlist by remember { mutableStateOf(loadPlaylistFromPrefs()) }
+                var playlist by remember { mutableStateOf(emptyList<AudioTrack>()) }
                 var currentIndex by remember { mutableStateOf(statePrefs.getInt("current_index", -1)) }
                 var isPlaying by remember { mutableStateOf(false) }
                 var isLoadingTrack by remember { mutableStateOf(false) }
@@ -375,41 +423,47 @@ class MainActivity : ComponentActivity() {
                 var durationMs by remember { mutableStateOf(1f) }
                 var isSeeking by remember { mutableStateOf(false) }
                 var speedMult by remember { mutableFloatStateOf(1.0f) }
-                var speedMode by remember {
-                    mutableStateOf(
-                        PlaybackSpeedMode.fromId(statePrefs.getInt("playback_speed_mode", PlaybackSpeedMode.MUSIC.id))
-                    )
-                }
-                var playbackContentMode by remember {
-                    mutableStateOf(
-                        PlaybackContentMode.fromId(
-                            statePrefs.getInt("playback_content_mode", PlaybackContentMode.BOOKS.id)
-                        )
-                    )
-                }
-                var playlistSortMode by remember {
-                    mutableStateOf(
-                        PlaylistSortMode.fromId(statePrefs.getInt("playlist_sort_mode", PlaylistSortMode.NAME.id))
-                    )
-                }
-                var eqSettings by remember {
-                    mutableStateOf(
-                        EqSettings.deserialize(
-                            enabled = statePrefs.getBoolean("eq_enabled", false),
-                            serialized = statePrefs.getString("eq_gains", null)
-                        )
-                    )
-                }
+                var speedMode by remember { mutableStateOf(PlaybackSpeedMode.MUSIC) }
+                var playbackContentMode by remember { mutableStateOf(PlaybackContentMode.BOOKS) }
+                var playlistSortMode by remember { mutableStateOf(PlaylistSortMode.NAME) }
+                var eqSettings by remember { mutableStateOf(EqSettings()) }
                 var sampleRateKhz by remember { mutableStateOf("") }
                 var bitDepth by remember { mutableStateOf("") }
                 var spectrumBands by remember { mutableStateOf(FloatArray(32)) }
                 var replayGainDb  by remember { mutableFloatStateOf(0f) }
                 var dsdNativeRate by remember { mutableIntStateOf(0) }
                 var bluetoothCodec by remember { mutableStateOf("") }
-                var shuffleEnabled by remember { mutableStateOf(statePrefs.getBoolean("shuffle_enabled", false)) }
-                var shuffleHistory by remember { mutableStateOf(loadIntListFromPrefs("shuffle_history_json")) }
-                var shuffleQueue by remember { mutableStateOf(loadIntListFromPrefs("shuffle_queue_json")) }
-                var libraryFolders by remember { mutableStateOf(loadLibraryFoldersFromPrefs()) }
+                var shuffleEnabled by remember { mutableStateOf(false) }
+                var shuffleHistory by remember { mutableStateOf(emptyList<Int>()) }
+                var shuffleQueue by remember { mutableStateOf(emptyList<Int>()) }
+                var libraryFolders by remember { mutableStateOf(emptyList<LibraryFolderEntry>()) }
+                var startupStateRestored by remember { mutableStateOf(false) }
+                var database by remember { mutableStateOf<MusicDatabase?>(null) }
+
+                LaunchedEffect(Unit) {
+                    val restored = withContext(Dispatchers.Default) {
+                        loadStartupRestoreSnapshot()
+                    }
+                    playlist = restored.playlist
+                    if (currentIndex !in restored.playlist.indices) {
+                        currentIndex = -1
+                    }
+                    speedMode = restored.speedMode
+                    playbackContentMode = restored.playbackContentMode
+                    playlistSortMode = restored.playlistSortMode
+                    eqSettings = restored.eqSettings
+                    shuffleEnabled = restored.shuffleEnabled
+                    shuffleHistory = restored.shuffleHistory
+                    shuffleQueue = restored.shuffleQueue
+                    libraryFolders = restored.libraryFolders
+                    startupStateRestored = true
+                }
+
+                LaunchedEffect(Unit) {
+                    database = withContext(Dispatchers.IO) {
+                        MusicDatabase.getDatabase(applicationContext)
+                    }
+                }
 
                 // DLNA / UPnP browser state
                 var dlnaShow     by remember { mutableStateOf(false) }
@@ -501,28 +555,34 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(shuffleEnabled, shuffleHistory, shuffleQueue) {
+                    if (!startupStateRestored) return@LaunchedEffect
                     statePrefs.edit().putBoolean("shuffle_enabled", shuffleEnabled).apply()
                     saveIntListToPrefs("shuffle_history_json", shuffleHistory)
                     saveIntListToPrefs("shuffle_queue_json", shuffleQueue)
                 }
 
                 LaunchedEffect(libraryFolders) {
+                    if (!startupStateRestored) return@LaunchedEffect
                     saveLibraryFoldersToPrefs(libraryFolders)
                 }
 
                 LaunchedEffect(speedMode) {
+                    if (!startupStateRestored) return@LaunchedEffect
                     statePrefs.edit().putInt("playback_speed_mode", speedMode.id).apply()
                 }
 
                 LaunchedEffect(playbackContentMode) {
+                    if (!startupStateRestored) return@LaunchedEffect
                     statePrefs.edit().putInt("playback_content_mode", playbackContentMode.id).apply()
                 }
 
                 LaunchedEffect(playlistSortMode) {
+                    if (!startupStateRestored) return@LaunchedEffect
                     statePrefs.edit().putInt("playlist_sort_mode", playlistSortMode.id).apply()
                 }
 
                 LaunchedEffect(eqSettings) {
+                    if (!startupStateRestored) return@LaunchedEffect
                     statePrefs.edit()
                         .putBoolean("eq_enabled", eqSettings.enabled)
                         .putString("eq_gains", eqSettings.serialize())
@@ -631,9 +691,10 @@ class MainActivity : ComponentActivity() {
                 }
 
                 // DB
-                val db = remember { MusicDatabase.getDatabase(applicationContext) }
-                val playlists by db.playlistDao().getAllPlaylists()
-                    .collectAsState(initial = emptyList())
+                val playlistFlow = remember(database) {
+                    database?.playlistDao()?.getAllPlaylists() ?: flowOf(emptyList<PlaylistEntity>())
+                }
+                val playlists by playlistFlow.collectAsState(initial = emptyList())
 
                 val currentTrack = if (currentIndex in playlist.indices) playlist[currentIndex] else null
                 val playlistSummary = remember(playlist) { PlaylistSummaryCalculator.fromTracks(playlist) }
@@ -1209,6 +1270,7 @@ class MainActivity : ComponentActivity() {
                 ) { _ -> }
 
                 LaunchedEffect(Unit) {
+                    delay(250L)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         permissionLauncher.launch(
                             arrayOf(
@@ -1278,23 +1340,28 @@ class MainActivity : ComponentActivity() {
                             TextButton(onClick = {
                                 val name = playlistName.trim()
                                 if (name.isNotEmpty()) {
-                                    lifecycleScope.launch(Dispatchers.IO) {
-                                        val id = db.playlistDao().insertPlaylist(
-                                            PlaylistEntity(name = name, shuffleEnabled = shuffleEnabled)
-                                        )
-                                        playlist.forEach { track ->
-                                            db.trackDao().insertTrack(
-                                                PlaylistTrackEntity(
-                                                    playlistId = id.toInt(),
-                                                    uriString = track.uri.toString(),
-                                                    title = track.name,
-                                                    folder = track.folder,
-                                                    durationMs = track.durationMs,
-                                                )
+                                    val db = database
+                                    if (db == null) {
+                                        Toast.makeText(applicationContext, "Playlist database is still loading", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        lifecycleScope.launch(Dispatchers.IO) {
+                                            val id = db.playlistDao().insertPlaylist(
+                                                PlaylistEntity(name = name, shuffleEnabled = shuffleEnabled)
                                             )
+                                            playlist.forEach { track ->
+                                                db.trackDao().insertTrack(
+                                                    PlaylistTrackEntity(
+                                                        playlistId = id.toInt(),
+                                                        uriString = track.uri.toString(),
+                                                        title = track.name,
+                                                        folder = track.folder,
+                                                        durationMs = track.durationMs,
+                                                    )
+                                                )
+                                            }
                                         }
+                                        Toast.makeText(applicationContext, "Playlist \"$name\" saved", Toast.LENGTH_SHORT).show()
                                     }
-                                    Toast.makeText(applicationContext, "Playlist \"$name\" saved", Toast.LENGTH_SHORT).show()
                                 }
                                 showCreatePlaylist = false
                                 playlistName = ""
@@ -1329,9 +1396,14 @@ class MainActivity : ComponentActivity() {
                                 TextButton(onClick = {
                                     val newName = renameText.trim()
                                     if (newName.isNotEmpty()) {
+                                        val db = database
                                         val id = renameTarget!!.id
-                                        lifecycleScope.launch(Dispatchers.IO) {
-                                            db.playlistDao().renamePlaylist(id, newName)
+                                        if (db == null) {
+                                            Toast.makeText(applicationContext, "Playlist database is still loading", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            lifecycleScope.launch(Dispatchers.IO) {
+                                                db.playlistDao().renamePlaylist(id, newName)
+                                            }
                                         }
                                     }
                                     renameTarget = null
@@ -1346,7 +1418,9 @@ class MainActivity : ComponentActivity() {
                             onDismissRequest = { showLoadPlaylist = false },
                             title = { Text("Playlists") },
                             text = {
-                                if (playlists.isEmpty()) {
+                                if (database == null) {
+                                    Text("Playlists are loading...")
+                                } else if (playlists.isEmpty()) {
                                     Text("No playlists saved yet.")
                                 } else {
                                     LazyColumn(modifier = Modifier.fillMaxWidth()) {
@@ -1355,6 +1429,10 @@ class MainActivity : ComponentActivity() {
                                                 modifier = Modifier
                                                     .fillMaxWidth()
                                                     .clickable {
+                                                        val db = database ?: run {
+                                                            Toast.makeText(applicationContext, "Playlist database is still loading", Toast.LENGTH_SHORT).show()
+                                                            return@clickable
+                                                        }
                                                         showLoadPlaylist = false
                                                         lifecycleScope.launch(Dispatchers.IO) {
                                                             val tracks = db.trackDao()
@@ -1420,6 +1498,10 @@ class MainActivity : ComponentActivity() {
                                                 // Delete button
                                                 IconButton(
                                                     onClick = {
+                                                        val db = database ?: run {
+                                                            Toast.makeText(applicationContext, "Playlist database is still loading", Toast.LENGTH_SHORT).show()
+                                                            return@IconButton
+                                                        }
                                                         lifecycleScope.launch(Dispatchers.IO) {
                                                             db.trackDao().deleteTracksForPlaylist(item.id)
                                                             db.playlistDao().deletePlaylist(item)
