@@ -3,13 +3,14 @@
 Date: 2026-04-03
 Project: MusicPlayerPro / HiFi Player
 Audited by: Codex
+Status: Post-remediation audit
 
 ## Scope
 
 This audit covered:
 
-- Android app architecture and build configuration
-- Kotlin application code and service lifecycle
+- Android build and release pipeline
+- Kotlin app architecture and service lifecycle
 - Native JNI/audio-engine integration
 - Persistence layer (Room + SharedPreferences)
 - DLNA/network playback path
@@ -17,264 +18,230 @@ This audit covered:
 
 ## Executive Summary
 
-The project is technically ambitious and already has several strong foundations: a custom native audio engine, meaningful JVM unit coverage around playback logic, successful debug/release builds, and a clear attempt to separate playback state transitions from Android framework glue.
+The project is in a materially stronger state than in the initial audit snapshot.
 
-The main risks are not in the core playback concept, but in reliability and maintainability around the app shell:
+The most important correctness and durability issues identified in the first pass have already been fixed:
 
-- The DLNA path has at least one concrete correctness bug and a few robustness gaps.
-- Playlist persistence is vulnerable to partial writes, destructive schema resets, and weak relational guarantees.
-- The activity layer owns too many responsibilities, which raises regression risk.
-- The build pipeline is functional, but showed Windows/KAPT instability and currently suppresses an unsupported `compileSdk` warning.
+- DLNA control URL resolution now handles default ports correctly.
+- Remote DLNA playback preparation now runs in `PlaybackService` instead of `MainActivity`.
+- Room playlist persistence now has explicit ordering, foreign-key integrity, real migration logic, and transactional writes.
+- DSD is now included in next-track gapless preload handling.
+- Automatic app backup is disabled, reducing privacy exposure for listening metadata.
+- DLNA cache files now use SHA-256-derived keys and are pruned by age/size.
 
-Overall assessment: solid prototype / advanced hobby product, but not yet production-hardened.
+The remaining risks are mostly around toolchain alignment, Windows build ergonomics, app-layer architecture, and missing integration tests.
 
-## What Is Working Well
+Overall assessment: advanced prototype with meaningful follow-through on audit findings; remaining work is important, but no longer centered on the previously identified core correctness bugs.
 
-- Native engine integration is encapsulated behind `AudioEngine` and guarded in JNI with a global mutex (`src/jni/audio_engine_jni.cpp`).
-- Playback behavior is partially modeled as pure Kotlin logic with unit tests (`PlaybackStateMachine`, shuffle/order/restore tests).
-- Release hardening is enabled through R8/resource shrinking (`app/build.gradle.kts`).
-- Both `assembleDebug --no-daemon` and `assembleRelease --no-daemon` completed successfully during this audit.
-- `./gradlew.bat test` passed.
+## Resolved Since The Initial Audit
 
-## Findings
+### DLNA path hardening
 
-### High 1: DLNA control URL resolution breaks on default ports
+Resolved in:
 
-Evidence:
+- [DlnaDiscovery.kt](C:\Install\AI%20Research\MusicPlayerPro\app\src\main\java\com\aiproject\musicplayer\DlnaDiscovery.kt)
+- [DlnaProtocol.kt](C:\Install\AI%20Research\MusicPlayerPro\app\src\main\java\com\aiproject\musicplayer\DlnaProtocol.kt)
+- [DlnaPlaybackCache.kt](C:\Install\AI%20Research\MusicPlayerPro\app\src\main\java\com\aiproject\musicplayer\DlnaPlaybackCache.kt)
+- [PlaybackService.kt](C:\Install\AI%20Research\MusicPlayerPro\app\src\main\java\com\aiproject\musicplayer\PlaybackService.kt)
 
-- `app/src/main/java/com/aiproject/musicplayer/DlnaDiscovery.kt:139-148`
+What changed:
 
-Problem:
+- `controlURL` resolution now uses proper URL resolution semantics instead of manual host/port concatenation.
+- SOAP browse requests now escape `ObjectID`.
+- Remote-track preparation moved into the service-owned playback path.
+- DLNA cache entries now use SHA-256-derived filenames and pruning rules.
 
-- `resolveControlUrl()` builds `base` with `${u.host}:${u.port}` even when `u.port == -1`.
-- For a common device-description URL such as `http://server/desc.xml`, the computed base becomes `http://server:-1`, which is invalid.
+Result:
 
-Impact:
+- The DLNA path is more correct, more lifecycle-safe, and more storage-safe than before.
 
-- DLNA discovery may succeed but browsing can fail against standards-compliant servers that use default HTTP/HTTPS ports.
+### Playlist persistence hardening
 
-Recommendation:
+Resolved in:
 
-- Resolve `controlURL` with `URL(location)`/`URI.resolve(...)` semantics and omit the port when it is unspecified.
+- [Entities.kt](C:\Install\AI%20Research\MusicPlayerPro\app\src\main\java\com\aiproject\musicplayer\db\Entities.kt)
+- [Daos.kt](C:\Install\AI%20Research\MusicPlayerPro\app\src\main\java\com\aiproject\musicplayer\db\Daos.kt)
+- [MusicDatabase.kt](C:\Install\AI%20Research\MusicPlayerPro\app\src\main\java\com\aiproject\musicplayer\db\MusicDatabase.kt)
+- [MainActivity.kt](C:\Install\AI%20Research\MusicPlayerPro\app\src\main\java\com\aiproject\musicplayer\MainActivity.kt)
 
-### High 2: Playlist persistence is not transaction-safe and can be destructively reset
+What changed:
 
-Evidence:
+- `playlist_tracks` now has a foreign key to `playlists`.
+- Playlist order is now explicit via `playOrder`.
+- Save/delete flows now use Room transactions.
+- `fallbackToDestructiveMigration()` was removed and replaced with a real schema migration.
 
-- `app/src/main/java/com/aiproject/musicplayer/db/Entities.kt:13-20`
-- `app/src/main/java/com/aiproject/musicplayer/db/Daos.kt:23-30`
-- `app/src/main/java/com/aiproject/musicplayer/db/MusicDatabase.kt:19-25`
-- `app/src/main/java/com/aiproject/musicplayer/MainActivity.kt:1347-1362`
-- `app/src/main/java/com/aiproject/musicplayer/MainActivity.kt:1505-1507`
+Result:
 
-Problem:
+- Playlist durability and consistency are significantly improved.
 
-- `playlist_tracks` has no foreign key, no explicit index, and no stored track order column.
-- Save/delete operations are executed as multi-step UI-driven sequences instead of a single Room transaction.
-- `fallbackToDestructiveMigration()` will silently wipe saved playlists on schema changes.
+### Native format consistency
 
-Impact:
+Resolved in:
 
-- Partial playlist saves/deletes can leave inconsistent state.
-- Orphaned `playlist_tracks` rows are possible.
-- User data durability is weak for a media app that explicitly promotes playlist persistence.
+- [audio_engine_jni.cpp](C:\Install\AI%20Research\MusicPlayerPro\src\jni\audio_engine_jni.cpp)
 
-Recommendation:
+What changed:
 
-- Introduce relational integrity (`ForeignKey`, indexes, explicit order column).
-- Move save/load/delete into transactional DAO/repository methods.
-- Replace destructive migration fallback with real migrations.
+- DSD support was added to `loadNextFileFd()`, aligning next-track preload behavior with current-track load behavior.
 
-### Medium 3: Remote playback startup is owned by the Activity instead of the Service
+Result:
 
-Evidence:
+- Advertised format support is more internally consistent, including gapless preload scenarios.
 
-- `app/src/main/java/com/aiproject/musicplayer/MainActivity.kt:917-926`
-- `app/src/main/java/com/aiproject/musicplayer/DlnaPlaybackCache.kt:11-48`
+### Privacy hardening
 
-Problem:
+Resolved in:
 
-- DLNA cache resolution/download happens inside `MainActivity.lifecycleScope` before playback is handed to `PlaybackService`.
-- If the activity is recreated or backgrounded during that work, remote playback startup can be interrupted.
+- [AndroidManifest.xml](C:\Install\AI%20Research\MusicPlayerPro\app\src\main\AndroidManifest.xml)
 
-Impact:
+What changed:
 
-- Network playback is less reliable than local playback.
-- Background/lock-screen behavior is coupled to UI lifecycle instead of playback lifecycle.
+- `android:allowBackup` is now `false`.
 
-Recommendation:
+Result:
 
-- Move remote URI resolution and cache/download policy into the service or a dedicated playback repository owned by the service.
+- The app no longer opts in to automatic backup of user listening metadata by default.
 
-### Medium 4: Gapless preload path is inconsistent across supported formats
+## Remaining Findings
+
+### Medium 1: AGP 8.5.0 + compileSdk 35 warning remains
 
 Evidence:
 
-- Current-track loading supports DSD: `src/jni/audio_engine_jni.cpp:69-76`
-- Next-track preload does not: `src/jni/audio_engine_jni.cpp:196-210`
+- [app/build.gradle.kts](C:\Install\AI%20Research\MusicPlayerPro\app\build.gradle.kts)
+- local build output during `assembleRelease --no-daemon`
 
 Problem:
 
-- `loadFileFd()` attempts FLAC, MP3, WAV, and DSD.
-- `loadNextFileFd()` only attempts FLAC, MP3, and WAV.
+- The project builds with `compileSdk = 35`, but Android Gradle Plugin `8.5.0` warns that it was tested only up to `compileSdk 34`.
 
 Impact:
 
-- Gapless preloading silently excludes DSD tracks even though DSD is advertised as supported.
-
-Recommendation:
-
-- Add `DsdDecoder` handling to `loadNextFileFd()` or explicitly document the limitation in UI/README.
-
-### Medium 5: Build pipeline is functional but not yet stable or fully future-proof
-
-Evidence:
-
-- `gradle.properties:4`
-- Observed during audit:
-  - `./gradlew.bat test` succeeded, but Kotlin daemon fell back after a `FileNotFoundException` in KAPT incremental data.
-  - `./gradlew.bat assembleDebug` initially failed on Windows because Gradle could not delete a KAPT cache directory.
-  - `./gradlew.bat assembleDebug --no-daemon` then succeeded.
-  - `./gradlew.bat assembleRelease --no-daemon` succeeded.
-
-Problem:
-
-- The project currently suppresses the unsupported `compileSdk 35` warning.
-- KAPT/daemon/cache behavior is flaky enough to hurt local productivity and CI confidence.
-
-Impact:
-
-- Reproducibility is weaker than the successful final build result suggests.
-- Future Gradle/AGP upgrades may be harder than expected.
-
-Recommendation:
-
-- Align AGP/Kotlin/Compose/compileSdk onto a fully supported matrix.
-- Reduce KAPT exposure where possible.
-- Add a clean CI path using `--no-daemon` or isolated runners until root cause is fixed.
-
-### Medium 6: Service restart policy is weaker than the app positioning suggests
-
-Evidence:
-
-- `app/src/main/java/com/aiproject/musicplayer/PlaybackService.kt:108-111`
-
-Problem:
-
-- `onStartCommand()` returns `START_NOT_STICKY`.
-
-Impact:
-
-- If the process is killed during playback, Android will not automatically recreate the service.
-- This is at odds with the app's "always alive" product messaging.
-
-Recommendation:
-
-- Re-evaluate restart semantics for active playback sessions and document the intended behavior clearly.
-
-### Low 7: Backup/privacy defaults are permissive
-
-Evidence:
-
-- `app/src/main/AndroidManifest.xml:15-21`
-- `app/src/main/java/com/aiproject/musicplayer/MainActivity.kt:294-412`
-
-Problem:
-
-- `android:allowBackup="true"` is enabled.
-- The app stores playlist state, bookmarks, shuffle history, library folders, and other listening metadata in SharedPreferences.
-
-Impact:
-
-- Personal listening/bookmark metadata may be included in device backups unless controlled elsewhere.
-
-Recommendation:
-
-- Add explicit backup rules or disable backups if that metadata should remain local-only.
-
-### Low 8: DLNA cache has no eviction policy and uses hash-based file names
-
-Evidence:
-
-- `app/src/main/java/com/aiproject/musicplayer/DlnaPlaybackCache.kt:15-58`
-
-Problem:
-
-- Cached audio files are kept indefinitely.
-- Cache filenames are derived from `trackUri.toString().hashCode()`.
-
-Impact:
-
-- Storage can grow without bounds.
-- Hash collisions, while uncommon, can alias two different remote tracks.
-
-Recommendation:
-
-- Add LRU/TTL cleanup and switch to a collision-resistant cache key.
-
-## Architecture Observations
-
-- `MainActivity.kt` is 1,937 lines / ~105 KB.
-- `MainActivitySections.kt` is ~53 KB.
-- `PlaybackService.kt` is 615 lines.
-
-Interpretation:
-
-- The UI layer currently owns service binding, persistence helpers, SAF traversal, MediaStore scanning, network-playback prep, and playback orchestration.
-- This makes recomposition behavior, lifecycle behavior, and persistence behavior harder to reason about and test independently.
-
-Recommended direction:
-
-- Introduce a `ViewModel` + repository split.
-- Move persistence and playback orchestration out of composables/activity-local helpers.
-- Leave the activity mostly responsible for UI composition and Android permission/result plumbing.
-
-## Test Coverage Assessment
-
-Observed:
-
-- 15 JVM unit test files exist under `app/src/test`.
-- No `app/src/androidTest` directory is present.
-- No instrumentation/UI tests were found for SAF, MediaSession/notification behavior, service lifecycle, or DLNA.
-- No native-engine automated test harness was found.
+- This is not an immediate correctness bug and not a current release blocker.
+- It does increase the chance of future build-tool surprises, especially after Android Studio / Gradle updates or CI changes.
 
 Assessment:
 
-- Pure Kotlin logic coverage is meaningfully better than average for a project of this size.
-- Integration coverage is still thin in the highest-risk areas.
+- Importance: moderate.
+- Urgency: not critical if local release builds are green, but worth addressing before the next toolchain refresh or wider distribution cycle.
 
-Recommended next tests:
+Recommendation:
 
-- Instrumentation tests for `PlaybackService` lifecycle and media controls
-- SAF import/browse regression tests
-- DLNA parsing/resolution tests, especially default-port and malformed-XML cases
-- Native smoke tests for format loading and gapless transitions
+- Upgrade AGP/Kotlin/Compose to a fully supported matrix for `compileSdk 35`.
+
+### Medium 2: Windows Gradle/KAPT behavior is improved but still not ideal
+
+Evidence:
+
+- [gradle.properties](C:\Install\AI%20Research\MusicPlayerPro\gradle.properties)
+- [app/build.gradle.kts](C:\Install\AI%20Research\MusicPlayerPro\app\build.gradle.kts)
+
+Problem:
+
+- The build is now more reliable locally because Kotlin/KAPT incremental compilation was disabled, but the underlying Windows toolchain path is still less clean than ideal.
+
+Impact:
+
+- Local builds are reliable enough, but slower and still more fragile than a fully aligned toolchain should be.
+
+Recommendation:
+
+- Revisit this after the AGP upgrade and consider reducing KAPT exposure longer term.
+
+### Medium 3: `MainActivity` is still too large and owns too much orchestration
+
+Evidence:
+
+- [MainActivity.kt](C:\Install\AI%20Research\MusicPlayerPro\app\src\main\java\com\aiproject\musicplayer\MainActivity.kt)
+- [MainActivitySections.kt](C:\Install\AI%20Research\MusicPlayerPro\app\src\main\java\com\aiproject\musicplayer\MainActivitySections.kt)
+
+Problem:
+
+- The activity layer still centralizes a large amount of UI state, persistence glue, SAF handling, and playback orchestration.
+
+Impact:
+
+- Regression risk remains higher than necessary.
+- Independent testing of app-state behavior is harder than it should be.
+
+Recommendation:
+
+- Continue moving orchestration toward `ViewModel`/repository/service-owned boundaries.
+
+### Medium 4: Integration test coverage is still thin
+
+Evidence:
+
+- [app/src/test/java](C:\Install\AI%20Research\MusicPlayerPro\app\src\test\java)
+- no `app/src/androidTest`
+
+Problem:
+
+- JVM unit tests are present and useful, but there are still no instrumentation tests for service lifecycle, SAF, notifications, or DLNA UI flows.
+
+Impact:
+
+- High-value user flows still depend heavily on manual regression testing.
+
+Recommendation:
+
+- Add instrumentation coverage for playback service lifecycle, SAF flows, notification/media controls, and DLNA smoke tests.
+
+### Low 5: Service restart semantics may still be weaker than the product messaging suggests
+
+Evidence:
+
+- [PlaybackService.kt](C:\Install\AI%20Research\MusicPlayerPro\app\src\main\java\com\aiproject\musicplayer\PlaybackService.kt)
+
+Problem:
+
+- `onStartCommand()` still returns `START_NOT_STICKY`.
+
+Impact:
+
+- If the process is killed during playback, automatic recovery may be weaker than some users expect from "always alive" wording.
+
+Recommendation:
+
+- Re-evaluate restart behavior and align documentation with the exact runtime contract.
+
+## Test Coverage Assessment
+
+Current state:
+
+- JVM unit tests cover playback state logic, queue behavior, ordering, restore, speed behavior, DSD labeling, and new DLNA protocol cases.
+- No instrumentation/UI tests are present yet.
+- No dedicated native-engine automated harness was found.
+
+Assessment:
+
+- Logic-level coverage is solid for a project of this size.
+- System-level regression coverage is still the next meaningful gap.
 
 ## Verification Performed
 
-Commands executed during the audit:
+Commands executed after remediation:
 
-- `./gradlew.bat test`
-- `./gradlew.bat assembleDebug`
-- `./gradlew.bat --stop`
-- `./gradlew.bat assembleDebug --no-daemon`
-- `./gradlew.bat assembleRelease --no-daemon`
+- `.\gradlew.bat --stop`
+- `.\gradlew.bat clean test --no-daemon`
+- `.\gradlew.bat assembleRelease --no-daemon`
 
 Results:
 
-- Unit tests passed.
-- Debug build passed after daemon reset and `--no-daemon`.
-- Release build passed with `--no-daemon`.
+- JVM tests passed.
+- Release build passed.
+- Release APK produced successfully at [app-release.apk](C:\Install\AI%20Research\MusicPlayerPro\app\build\outputs\apk\release\app-release.apk).
 
-## Priority Action Plan
+## Recommended Next Steps
 
-1. Fix DLNA `controlURL` resolution and add tests for default-port servers.
-2. Replace destructive Room migration behavior and make playlist persistence transactional.
-3. Move remote playback preparation out of `MainActivity` and into service-owned code.
-4. Normalize gapless support behavior across all advertised formats, including DSD.
-5. Reduce build fragility by stabilizing the Gradle/KAPT toolchain and removing warning suppression where possible.
-6. Start carving `MainActivity` into ViewModel/repository/service-facing layers.
+1. Upgrade AGP/Kotlin/Compose onto a fully supported `compileSdk 35` toolchain.
+2. Add `androidTest` coverage for service lifecycle, notification/media controls, SAF flows, and DLNA smoke tests.
+3. Continue decomposing `MainActivity` into clearer UI/state/repository boundaries.
+4. Revisit service restart semantics and document the intended behavior precisely.
 
 ## Final Assessment
 
-This is a capable and interesting audio player with real engineering effort behind the playback core. The next maturity step is not "more features"; it is operational hardening around persistence, networking, lifecycle ownership, and maintainability boundaries.
+The original audit found real issues, and the project now reflects meaningful follow-through rather than a superficial patch round. The highest-value correctness and durability problems were addressed successfully.
+
+At this point, the biggest remaining concerns are maintainability and toolchain alignment, not the core playback path.

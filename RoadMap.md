@@ -1,6 +1,6 @@
 # HiFi Player Roadmap
 
-This roadmap now reflects only what is already implemented and the current product rules. New items will be added later, step by step, after implementation and validation.
+This roadmap reflects the current implemented state plus the most important next engineering steps.
 
 ## Implemented
 
@@ -11,9 +11,11 @@ This roadmap now reflects only what is already implemented and the current produ
 - [x] `Books` mode with per-track progress memory and completed-track markers
 - [x] `Music` mode with pause-only resume and no long-term played-track memory
 - [x] MediaStore scan, recursive SAF folder import, Library Folders manager, and in-app browsing inside granted folders
-- [x] Room playlists with save, load, rename, delete, and partial recovery for unavailable tracks
-- [x] DLNA browse and add-to-playlist flow
+- [x] Room playlists with save, load, rename, delete, partial recovery, explicit ordering, and schema migration
+- [x] DLNA browse and add-to-playlist flow with service-owned remote playback preparation
+- [x] DLNA cache validation, SHA-256 cache keys, and age/size pruning
 - [x] Device-output detection, Bluetooth codec display, and real-device stability fixes around reconnect and transport
+- [x] Backup disabled by default for local listening metadata privacy
 
 ## Current Product Rules
 
@@ -29,3 +31,10 @@ This roadmap now reflects only what is already implemented and the current produ
 - Release build must stay green.
 - New playback changes must be manually checked on real Android hardware before being treated as stable.
 - Every code change must also bump the Android app version. See [copilot-instructions.md](copilot-instructions.md).
+
+## Current Engineering Priorities
+
+- Align AGP / Kotlin / Compose with a fully supported `compileSdk 35` toolchain.
+- Add `androidTest` coverage for `PlaybackService`, notifications/media controls, SAF flows, and DLNA smoke paths.
+- Continue reducing `MainActivity` size by moving orchestration into clearer state/repository layers.
+- Revisit service restart semantics and decide whether `START_NOT_STICKY` is still the intended production behavior.

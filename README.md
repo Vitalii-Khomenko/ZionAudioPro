@@ -30,6 +30,8 @@ HiFi Player is built differently, from the ground up:
 | **Audio focus** | Abrupt stop or ignore | **Full state machine** — fade-out on mic/call/notification, auto-resume, smooth duck |
 | **Device reconnect** | Stream dies after headphone/BT switch | **Auto-reconnect** — Oboe stream restarts automatically after routing change or screen recording |
 
+Note: Android audio behavior still depends on device firmware, driver quality, DAC implementation, and vendor routing policy. HiFi Player minimizes avoidable app-side degradation, but no Android app can override every hardware or OS limitation on every device.
+
 ### The 64-Bit Difference
 
 When your DAC plays back a 24-bit / 96 kHz recording, the difference between noise floor and maximum signal is 144 dB. At 16-bit that headroom collapses to 96 dB. **A single rounding error in 32-bit float processing at high sample rates introduces quantization noise that is audible on high-end headphones.**
@@ -137,6 +139,8 @@ Android's standard `AudioTrack` has 20–50 ms latency and introduces its own re
 - **ContentDirectory browse** — SOAP request returns up to 500 audio tracks per container
 - **Add to playlist** — add individual tracks or entire server library to the current playlist
 - **Safe HTTP cache** — DLNA tracks are validated via HTTP status code, downloaded to a `.tmp` file first, then renamed to final path only on successful completion; cancelled or failed downloads never leave a corrupt cache file
+- **Service-owned remote playback prep** — DLNA cache/download resolution now runs inside `PlaybackService`, so remote playback startup is no longer tied to `MainActivity` lifecycle
+- **Cache pruning + stable keys** — cached DLNA files now use SHA-256-based names and are pruned by age/size to reduce stale growth and collision risk
 - Access via **⋮ → Browse Network (DLNA)** — scan starts automatically on open
 
 ### Playlist Management
@@ -145,6 +149,7 @@ Android's standard `AudioTrack` has 20–50 ms latency and introduces its own re
 - **Scan MediaStore** — discover all audio files on the device
 - **Sort by Name / Number** — playlist menu can resort tracks alphabetically or by parsed numeric tokens from filenames such as `01 Intro`, `Chapter 12`, or `Part_7_Final`
 - **Save / Load / Rename / Delete** playlists — backed by Room SQLite database, preserving folder label, cached duration metadata, and shuffle-enabled state
+- **Transactional ordered playlists** — Room playlist tracks now store explicit order, enforce parent-child integrity, and migrate forward without destructive reset
 - **Folder path** shown under each track name in the playlist
 - **Load saved playlist with partial recovery** — if some stored SAF items are no longer readable, the app loads the remaining readable tracks and reports how many items were skipped
 - **Clear** — removes the current playlist and resets audiobook progress markers, but keeps configured library folders intact and does not auto-rebuild the playlist from them later
@@ -369,6 +374,12 @@ The following issues were identified and fixed during a dedicated code audit:
 | **Spectrum data race** (C++) | HIGH | `updateSpectrum()` now holds `m_specMutex` during writes; no more UB between audio-callback thread and JNI reader |
 | **Activity memory leak via callbacks** | HIGH | All 5 Service callbacks (`skipToNext`, `onTrackCompleted`, etc.) explicitly nulled in `MainActivity.onDestroy()` |
 | **DLNA corrupt or hung cache download** | MEDIUM | download now validates HTTP status, uses connect/read timeouts, writes to `.tmp` first, and cleans partial files on failure |
+| **DLNA default-port browse failure** | HIGH | control URL resolution now uses proper URL resolution semantics instead of constructing `host:-1` for default ports |
+| **Activity-owned remote playback startup** | HIGH | DLNA cache/download resolution moved into `PlaybackService`, so remote playback is no longer coupled to `MainActivity` lifecycle |
+| **Playlist schema durability gap** | HIGH | Room playlists now use explicit order, foreign keys, transactions, and a real migration instead of destructive fallback |
+| **DSD gapless preload mismatch** | MEDIUM | next-track preload now includes DSD, aligning gapless behavior with advertised format support |
+| **Backup privacy exposure** | LOW | automatic app backup disabled to avoid copying listening metadata by default |
+| **DLNA unbounded cache growth / weak cache keys** | MEDIUM | cache now uses SHA-256 names plus age/size pruning |
 | **Toast Activity context leak** | MEDIUM | All `Toast.makeText()` calls use `applicationContext` instead of `this@MainActivity` |
 | **Service killed by Xiaomi on focus loss** | HIGH | `stopForeground(false)` removed from `showNotification()`; service stays foreground until `stopPlayback()` |
 | **Sleep timer state desync** | MEDIUM | timer expiry now pauses through `PlaybackService`, so `MediaSession`, notification, focus and engine state remain aligned |
@@ -391,7 +402,7 @@ cd High-Fidelity-64-Bit-Audio-Engine
 
 ### Debug APK (development / sideload)
 ```bash
-./gradlew assembleDebug
+./gradlew assembleDebug --no-daemon
 # Output: app/build/outputs/apk/debug/app-debug.apk  (~29 MB, unoptimized)
 ```
 
@@ -400,13 +411,13 @@ The project ships with a pre-generated keystore (`hifi-player.jks`).
 Signing credentials are in `local.properties` (excluded from git via `.gitignore`).
 
 ```bash
-./gradlew assembleRelease
+./gradlew assembleRelease --no-daemon
 # Output: app/build/outputs/apk/release/app-release.apk  (~17 MB)
 ```
 
 ### Run unit tests (no device needed)
 ```bash
-./gradlew test
+./gradlew test --no-daemon
 ```
 
 ### Install directly to a connected device
@@ -418,13 +429,18 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ### Clean build
 ```bash
-./gradlew clean assembleRelease
+./gradlew clean assembleRelease --no-daemon
 ```
 
 ### Windows (Command Prompt / PowerShell)
 ```bat
-gradlew.bat assembleRelease
+gradlew.bat assembleRelease --no-daemon
 ```
+
+### Known Build Note
+
+- The project currently builds successfully with `compileSdk = 35`, but AGP `8.5.0` still warns that it was tested only up to `compileSdk = 34`.
+- On Windows, `--no-daemon` is currently the most reliable path for repeatable local builds.
 
 ### Generate your own keystore
 ```bash
@@ -443,10 +459,10 @@ Then update the four `KEYSTORE_*` lines in `local.properties`.
 
 | Component | Minimum |
 |-----------|---------|
-| Android OS | 8.0 (API 26) |
+| Android OS | 7.0 (API 24) |
 | Target SDK | 35 (Android 15) |
 | Architecture | arm64-v8a, armeabi-v7a, x86, x86_64 |
-| NDK | r25c (C++17) |
+| NDK | 26.1.10909125 (C++17) |
 | Gradle | 8.x |
 
 ### Dependencies
@@ -472,9 +488,9 @@ Current approach is simple: this file describes what is already in the app. New 
 - [x] Shuffle, repeat, sleep timer, and lock-screen controls
 - [x] `Books` / `Music` playback modes
 - [x] Playlist save/load, Library Folders manager, and in-app folder browsing
-- [x] MediaStore scan and DLNA browsing
+- [x] MediaStore scan, DLNA browsing, and service-owned remote playback preparation
 - [x] Device-output info and Bluetooth codec display
-- [x] Real-device stability fixes around audio focus, reconnect, and transport flow
+- [x] Real-device stability fixes around audio focus, reconnect, transport flow, and cache/persistence hardening
 
 ---
 
