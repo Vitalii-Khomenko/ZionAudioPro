@@ -243,6 +243,7 @@ public:
     // ── Spectrum ─────────────────────────────────────────────────────────────
 
     void getSpectrumBands(float* bands, int bandCount, uint32_t sampleRate) const {
+        if (!bands || bandCount <= 0) return;
         // Decay to zero when not playing
         if (!m_isPlaying.load(std::memory_order_relaxed) || sampleRate == 0) {
             std::lock_guard<std::mutex> lk(m_specMutex);
@@ -252,13 +253,22 @@ public:
             }
             return;
         }
+        // Snapshot the circular buffer quickly, then perform the FFT work outside
+        // the mutex so the decode thread is not blocked by UI spectrum polling.
+        std::array<float, SPECTRUM_N> specSnapshot{};
+        size_t wp = 0;
+        {
+            std::lock_guard<std::mutex> lk(m_specMutex);
+            specSnapshot = m_specBuf;
+            wp = m_specWritePos.load(std::memory_order_acquire);
+        }
+
         // Copy circular buffer (oldest -> newest)
         std::array<double, SPECTRUM_N> re{}, im{};
-        const size_t wp = m_specWritePos.load(std::memory_order_acquire);
         for (size_t i = 0; i < SPECTRUM_N; ++i) {
             const size_t idx = (wp + i) % SPECTRUM_N;
             const double w = 0.5 * (1.0 - std::cos(2.0 * M_PI * i / (SPECTRUM_N - 1)));
-            re[i] = static_cast<double>(m_specBuf[idx]) * w;
+            re[i] = static_cast<double>(specSnapshot[idx]) * w;
         }
         dsp::fft(re.data(), im.data(), static_cast<int>(SPECTRUM_N));
 

@@ -1222,15 +1222,16 @@ class MainActivity : ComponentActivity() {
                     while (true) {
                         if (isBound) {
                             if (isPlaying) {
-                                val bands = FloatArray(32)
-                                playbackService?.getEngine()?.getSpectrum(bands)
+                                val bands = withContext(Dispatchers.Default) {
+                                    FloatArray(32).also { playbackService?.getEngine()?.getSpectrum(it) }
+                                }
                                 spectrumBands = bands
                             } else if (spectrumBands.any { it > 0.001f }) {
                                 // Smooth decay so bars animate down rather than snap to 0
                                 spectrumBands = FloatArray(32) { i -> spectrumBands[i] * 0.75f }
                             }
                         }
-                        delay(33) // ~30 fps
+                        delay(50) // ~20 fps, enough for UI while leaving more headroom for audio
                     }
                 }
 
