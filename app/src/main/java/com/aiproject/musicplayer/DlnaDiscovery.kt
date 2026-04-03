@@ -84,33 +84,25 @@ object DlnaDiscovery {
      */
     suspend fun browse(server: DlnaServer, objectId: String = "0"): List<DlnaTrack> =
         withContext(Dispatchers.IO) {
-            val soap = """<?xml version="1.0" encoding="utf-8"?>
-<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
-            s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-  <s:Body>
-    <u:Browse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">
-      <ObjectID>$objectId</ObjectID>
-      <BrowseFlag>BrowseDirectChildren</BrowseFlag>
-      <Filter>dc:title,res,res@duration,upnp:class</Filter>
-      <StartingIndex>0</StartingIndex>
-      <RequestedCount>500</RequestedCount>
-      <SortCriteria/>
-    </u:Browse>
-  </s:Body>
-</s:Envelope>"""
+            val soap = DlnaProtocol.buildBrowseEnvelope(objectId)
             try {
-                val conn = URL(server.controlUrl).openConnection() as HttpURLConnection
-                conn.requestMethod = "POST"
-                conn.setRequestProperty("Content-Type", "text/xml; charset=\"utf-8\"")
-                conn.setRequestProperty(
-                    "SOAPAction",
-                    "\"urn:schemas-upnp-org:service:ContentDirectory:1#Browse\""
-                )
-                conn.connectTimeout = 5_000
-                conn.readTimeout   = 15_000
-                conn.doOutput = true
-                OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(soap) }
-                parseBrowse(conn.inputStream.bufferedReader(Charsets.UTF_8).readText())
+                val conn = (URL(server.controlUrl).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    setRequestProperty("Content-Type", "text/xml; charset=\"utf-8\"")
+                    setRequestProperty(
+                        "SOAPAction",
+                        "\"urn:schemas-upnp-org:service:ContentDirectory:1#Browse\""
+                    )
+                    connectTimeout = 5_000
+                    readTimeout = 15_000
+                    doOutput = true
+                }
+                try {
+                    OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(soap) }
+                    DlnaProtocol.parseBrowse(conn.inputStream.bufferedReader(Charsets.UTF_8).readText())
+                } finally {
+                    conn.disconnect()
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
                 emptyList()
@@ -120,16 +112,15 @@ object DlnaDiscovery {
     // ── Private helpers ───────────────────────────────────────────────────────
 
     private fun fetchText(url: String): String {
-        val conn = URL(url).openConnection() as HttpURLConnection
-        conn.connectTimeout = 5_000; conn.readTimeout = 10_000
-        return conn.inputStream.bufferedReader(Charsets.UTF_8).readText()
-    }
-
-    /** Extract first occurrence of <tag>content</tag>. */
-    private fun xmlTag(xml: String, tag: String): String? {
-        val s = xml.indexOf("<$tag>").takeIf { it >= 0 } ?: return null
-        val e = xml.indexOf("</$tag>", s).takeIf { it >= 0 } ?: return null
-        return xml.substring(s + tag.length + 2, e).trim()
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 5_000
+            readTimeout = 10_000
+        }
+        return try {
+            conn.inputStream.bufferedReader(Charsets.UTF_8).readText()
+        } finally {
+            conn.disconnect()
+        }
     }
 
     /**
@@ -137,60 +128,12 @@ object DlnaDiscovery {
      * and resolve it against the [location] base URL.
      */
     private fun resolveControlUrl(location: String, xml: String): String? {
-        val cdIdx = xml.indexOf("ContentDirectory").takeIf { it >= 0 } ?: return null
-        val s = xml.indexOf("<controlURL>", cdIdx).takeIf { it >= 0 } ?: return null
-        val e = xml.indexOf("</controlURL>", s).takeIf { it >= 0 } ?: return null
-        val path = xml.substring(s + 12, e).trim()
-        if (path.startsWith("http", ignoreCase = true)) return path
-        val u = URL(location)
-        val base = "${u.protocol}://${u.host}:${u.port}"
-        return if (path.startsWith("/")) "$base$path"
-        else "$base/${u.path.substringBeforeLast('/')}/$path"
+        return DlnaProtocol.resolveControlUrl(location, xml)
     }
 
-    /**
-     * Parse ContentDirectory Browse SOAP response.
-     * Extracts <item> elements from the (XML-escaped) DIDL-Lite <Result>.
-     */
-    private fun parseBrowse(soapXml: String): List<DlnaTrack> {
-        val rs = soapXml.indexOf("<Result>").takeIf { it >= 0 } ?: return emptyList()
-        val re = soapXml.indexOf("</Result>", rs).takeIf { it >= 0 } ?: return emptyList()
-        val didl = soapXml.substring(rs + 8, re)
-            .replace("&lt;", "<").replace("&gt;", ">")
-            .replace("&amp;", "&").replace("&quot;", "\"").replace("&#39;", "'")
-
-        val tracks = mutableListOf<DlnaTrack>()
-        var pos = 0
-        while (true) {
-            val itemStart = didl.indexOf("<item", pos).takeIf { it >= 0 } ?: break
-            val itemEnd   = didl.indexOf("</item>", itemStart).takeIf { it >= 0 } ?: break
-            val item      = didl.substring(itemStart, itemEnd + 7)
-            pos = itemEnd + 7
-
-            val title = xmlTag(item, "dc:title") ?: xmlTag(item, "title") ?: continue
-
-            // Find first <res ...>URL</res> with an http URL
-            var resSearch = 0
-            var foundUrl: String? = null
-            while (foundUrl == null) {
-                val resOpen = item.indexOf("<res", resSearch).takeIf { it >= 0 } ?: break
-                val resTagEnd = item.indexOf('>', resOpen).takeIf { it >= 0 } ?: break
-                val resClose  = item.indexOf("</res>", resTagEnd).takeIf { it >= 0 } ?: break
-                val candidate = item.substring(resTagEnd + 1, resClose).trim()
-                if (candidate.startsWith("http", ignoreCase = true)) foundUrl = candidate
-                resSearch = resClose + 6
-            }
-            val url = foundUrl ?: continue
-
-            // Parse duration attribute: duration="H:MM:SS.mmm"
-            val durMs = Regex("""duration="(\d+):(\d+):(\d+)""")
-                .find(item)?.let { mr ->
-                    val (h, m, s) = mr.destructured
-                    (h.toLong() * 3_600 + m.toLong() * 60 + s.toLong()) * 1_000L
-                } ?: 0L
-
-            tracks += DlnaTrack(title, url, durMs)
-        }
-        return tracks
+    private fun xmlTag(xml: String, tag: String): String? {
+        val start = xml.indexOf("<$tag>").takeIf { it >= 0 } ?: return null
+        val end = xml.indexOf("</$tag>", start).takeIf { it >= 0 } ?: return null
+        return xml.substring(start + tag.length + 2, end).trim()
     }
 }

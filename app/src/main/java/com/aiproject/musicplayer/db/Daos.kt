@@ -20,7 +20,7 @@ interface PlaylistDao {
 
 @Dao
 interface TrackDao {
-    @Query("SELECT * FROM playlist_tracks WHERE playlistId = :playlistId")
+    @Query("SELECT * FROM playlist_tracks WHERE playlistId = :playlistId ORDER BY playOrder ASC")
     fun getTracksForPlaylist(playlistId: Int): Flow<List<PlaylistTrackEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)

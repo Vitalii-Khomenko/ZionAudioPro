@@ -41,6 +41,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
+import androidx.room.withTransaction
 import com.aiproject.musicplayer.db.*
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothA2dp
@@ -272,6 +273,7 @@ class MainActivity : ComponentActivity() {
             playbackService?.nextTrackProvider      = null
             playbackService?.onGaplessAdvanced      = null
             playbackService?.onTrackCompleted       = null
+            playbackService?.onTrackLoadFailed      = null
             unbindService(connection)
             isBound = false
         }
@@ -915,25 +917,14 @@ class MainActivity : ComponentActivity() {
                     // Load saved chapter position for this track
                     val resumePos = loadTrackPosition(track.uri)
                     lifecycleScope.launch {
-                        try {
-                            val playUri = DlnaPlaybackCache.resolvePlaybackUri(track.uri, cacheDir)
-                            playbackService?.playTrack(
-                                playUri, this@MainActivity, track.name, resumePos.toDouble()
-                            )
-                            playbackService?.setPlaybackSpeedMode(speedMode)
-                            playbackService?.setPlaybackSpeed(PlaybackSpeed.clamp(speedMult).toDouble())
-                            applyEqSettings()
-                            playbackService?.setVolume(volume.toDouble())
-                        } catch (e: Exception) {
-                            isPlaying = false
-                            Toast.makeText(
-                                applicationContext,
-                                "Failed to load ${track.name}",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        } finally {
-                            isLoadingTrack = false
-                        }
+                        playbackService?.playTrack(
+                            track.uri, this@MainActivity, track.name, resumePos.toDouble()
+                        )
+                        playbackService?.setPlaybackSpeedMode(speedMode)
+                        playbackService?.setPlaybackSpeed(PlaybackSpeed.clamp(speedMult).toDouble())
+                        applyEqSettings()
+                        playbackService?.setVolume(volume.toDouble())
+                        isLoadingTrack = false
                     }
                 }
 
@@ -1067,6 +1058,17 @@ class MainActivity : ComponentActivity() {
                                     progressMs = 0f
                                     clearPausedTrackState(removeCurrentIndex = true)
                                 }
+                            }
+                        }
+                        playbackService?.onTrackLoadFailed = { failedTitle ->
+                            lifecycleScope.launch(Dispatchers.Main) {
+                                isPlaying = false
+                                isLoadingTrack = false
+                                Toast.makeText(
+                                    applicationContext,
+                                    "Failed to load $failedTitle",
+                                    Toast.LENGTH_SHORT
+                                ).show()
                             }
                         }
                     }
@@ -1341,27 +1343,30 @@ class MainActivity : ComponentActivity() {
                                 val name = playlistName.trim()
                                 if (name.isNotEmpty()) {
                                     val db = database
-                                    if (db == null) {
-                                        Toast.makeText(applicationContext, "Playlist database is still loading", Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        lifecycleScope.launch(Dispatchers.IO) {
-                                            val id = db.playlistDao().insertPlaylist(
-                                                PlaylistEntity(name = name, shuffleEnabled = shuffleEnabled)
-                                            )
-                                            playlist.forEach { track ->
-                                                db.trackDao().insertTrack(
-                                                    PlaylistTrackEntity(
-                                                        playlistId = id.toInt(),
-                                                        uriString = track.uri.toString(),
-                                                        title = track.name,
-                                                        folder = track.folder,
-                                                        durationMs = track.durationMs,
+                                        if (db == null) {
+                                            Toast.makeText(applicationContext, "Playlist database is still loading", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            lifecycleScope.launch(Dispatchers.IO) {
+                                                db.withTransaction {
+                                                    val id = db.playlistDao().insertPlaylist(
+                                                        PlaylistEntity(name = name, shuffleEnabled = shuffleEnabled)
                                                     )
-                                                )
+                                                    playlist.forEachIndexed { order, track ->
+                                                        db.trackDao().insertTrack(
+                                                            PlaylistTrackEntity(
+                                                                playlistId = id.toInt(),
+                                                                uriString = track.uri.toString(),
+                                                                title = track.name,
+                                                                folder = track.folder,
+                                                                durationMs = track.durationMs,
+                                                                playOrder = order,
+                                                            )
+                                                        )
+                                                    }
+                                                }
                                             }
+                                            Toast.makeText(applicationContext, "Playlist \"$name\" saved", Toast.LENGTH_SHORT).show()
                                         }
-                                        Toast.makeText(applicationContext, "Playlist \"$name\" saved", Toast.LENGTH_SHORT).show()
-                                    }
                                 }
                                 showCreatePlaylist = false
                                 playlistName = ""
@@ -1503,8 +1508,9 @@ class MainActivity : ComponentActivity() {
                                                             return@IconButton
                                                         }
                                                         lifecycleScope.launch(Dispatchers.IO) {
-                                                            db.trackDao().deleteTracksForPlaylist(item.id)
-                                                            db.playlistDao().deletePlaylist(item)
+                                                            db.withTransaction {
+                                                                db.playlistDao().deletePlaylist(item)
+                                                            }
                                                         }
                                                     },
                                                     modifier = Modifier.size(36.dp)

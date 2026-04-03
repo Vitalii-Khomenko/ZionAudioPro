@@ -39,14 +39,15 @@ class AudioEngine {
 
     fun playTrack(uri: Uri, context: Context): Boolean {
         return try {
-            val pfd = context.contentResolver.openFileDescriptor(uri, "r")
-            val fd = pfd?.detachFd() ?: return false
-            if (loadFileFd(fd)) {
-                play()
-                true
-            } else {
-                false
-            }
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                val fd = pfd.detachFd()
+                if (loadFileFd(fd)) {
+                    play()
+                    true
+                } else {
+                    false
+                }
+            } ?: false
         } catch (e: Exception) {
             e.printStackTrace()
             false
@@ -55,9 +56,10 @@ class AudioEngine {
 
     fun loadNextTrack(uri: Uri, context: Context): Boolean {
         return try {
-            val pfd = context.contentResolver.openFileDescriptor(uri, "r")
-            val fd = pfd?.detachFd() ?: return false
-            loadNextFileFd(fd)
-        } catch (e: Exception) { false }
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                val fd = pfd.detachFd()
+                loadNextFileFd(fd)
+            } ?: false
+        } catch (_: Exception) { false }
     }
 }

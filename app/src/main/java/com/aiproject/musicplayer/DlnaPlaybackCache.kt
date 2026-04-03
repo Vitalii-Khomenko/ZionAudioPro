@@ -6,14 +6,25 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
 
 object DlnaPlaybackCache {
+    private const val CACHE_PREFIX = "dlna_"
+    private const val CACHE_EXT = ".audio"
+    private const val TEMP_EXT = ".tmp"
+    private const val MAX_CACHE_BYTES = 512L * 1024L * 1024L
+    private const val MAX_CACHE_AGE_MS = 14L * 24L * 60L * 60L * 1000L
+    private const val MAX_TEMP_AGE_MS = 24L * 60L * 60L * 1000L
+
     suspend fun resolvePlaybackUri(trackUri: Uri, cacheDir: File): Uri {
         if (!isRemoteTrackUri(trackUri)) return trackUri
 
         return withContext(Dispatchers.IO) {
+            cacheDir.mkdirs()
+            pruneCache(cacheDir)
             val cacheFile = cacheFile(cacheDir, trackUri)
             if (cacheFile.exists() && cacheFile.length() > 0L) {
+                cacheFile.setLastModified(System.currentTimeMillis())
                 return@withContext Uri.fromFile(cacheFile)
             }
 
@@ -52,8 +63,43 @@ object DlnaPlaybackCache {
         trackUri.scheme?.startsWith("http", ignoreCase = true) == true
 
     private fun cacheFile(cacheDir: File, trackUri: Uri): File =
-        File(cacheDir, "dlna_${trackUri.toString().hashCode()}.audio")
+        File(cacheDir, "${CACHE_PREFIX}${sha256(trackUri.toString())}$CACHE_EXT")
 
     private fun tempFile(cacheDir: File, trackUri: Uri): File =
-        File(cacheDir, "dlna_${trackUri.toString().hashCode()}.tmp")
+        File(cacheDir, "${CACHE_PREFIX}${sha256(trackUri.toString())}$TEMP_EXT")
+
+    private fun pruneCache(cacheDir: File) {
+        val now = System.currentTimeMillis()
+        val allFiles = cacheDir.listFiles { file ->
+            file.isFile && file.name.startsWith(CACHE_PREFIX)
+        }?.toList().orEmpty()
+
+        allFiles
+            .filter { it.name.endsWith(TEMP_EXT) && now - it.lastModified() > MAX_TEMP_AGE_MS }
+            .forEach { it.delete() }
+
+        allFiles
+            .filter { it.name.endsWith(CACHE_EXT) && now - it.lastModified() > MAX_CACHE_AGE_MS }
+            .forEach { it.delete() }
+
+        val audioFiles = cacheDir.listFiles { file ->
+            file.isFile && file.name.startsWith(CACHE_PREFIX) && file.name.endsWith(CACHE_EXT)
+        }?.sortedByDescending { it.lastModified() }.orEmpty()
+
+        var totalBytes = audioFiles.sumOf { it.length() }
+        if (totalBytes <= MAX_CACHE_BYTES) return
+
+        audioFiles.asReversed().forEach { file ->
+            if (totalBytes <= MAX_CACHE_BYTES) return
+            totalBytes -= file.length()
+            file.delete()
+        }
+    }
+
+    private fun sha256(value: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
+        return buildString(digest.size * 2) {
+            digest.forEach { byte -> append("%02x".format(byte)) }
+        }
+    }
 }

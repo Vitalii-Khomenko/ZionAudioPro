@@ -207,6 +207,9 @@ Java_com_aiproject_musicplayer_AudioEngine_loadNextFileFd(JNIEnv*, jobject, jint
     lseek(fd, 0, SEEK_SET);
     decoder = std::make_unique<WavDecoder>();
     if (decoder->openFd(fd)) { close(fd); g_player->setNextDecoder(std::move(decoder), rgDb); return JNI_TRUE; }
+    lseek(fd, 0, SEEK_SET);
+    decoder = std::make_unique<audio_engine::decoders::DsdDecoder>();
+    if (decoder->openFd(fd)) { close(fd); g_player->setNextDecoder(std::move(decoder), 0.0f); return JNI_TRUE; }
     close(fd);
     return JNI_FALSE;
 }

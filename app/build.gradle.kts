@@ -6,6 +6,10 @@ plugins {
     id("kotlin-kapt")
 }
 
+kapt {
+    useBuildCache = false
+}
+
 // Load signing properties from local.properties
 val localProps = Properties().also { props ->
     val f = rootProject.file("local.properties")

@@ -66,6 +66,7 @@ class PlaybackService : Service() {
     var skipToNextCallback: (() -> Unit)? = null
     var skipToPreviousCallback: (() -> Unit)? = null
     var onTrackCompleted: (() -> Unit)? = null
+    var onTrackLoadFailed: ((String) -> Unit)? = null
     var nextTrackProvider: (() -> QueuedTrack?)? = null
     var onGaplessAdvanced: (() -> Unit)? = null
 
@@ -373,8 +374,11 @@ class PlaybackService : Service() {
 
             val loaded = loadMutex.withLock {
                 withContext(Dispatchers.IO) {
-                    audioEngine.forceSilence()
-                    audioEngine.playTrack(uri, context)
+                    runCatching {
+                        val playbackUri = DlnaPlaybackCache.resolvePlaybackUri(uri, cacheDir)
+                        audioEngine.forceSilence()
+                        audioEngine.playTrack(playbackUri, context)
+                    }.getOrElse { false }
                 }
             }
             if (!loaded) {
@@ -386,6 +390,7 @@ class PlaybackService : Service() {
                 abandonAudioFocus()
                 updatePlaybackState(PlaybackStateCompat.STATE_STOPPED)
                 stopForeground(STOP_FOREGROUND_REMOVE)
+                onTrackLoadFailed?.invoke(title)
                 return@launch
             }
 
@@ -441,7 +446,11 @@ class PlaybackService : Service() {
                             val nextTrack = nextTrackProvider?.invoke()
                             if (nextTrack != null) {
                                 withContext(Dispatchers.IO) {
-                                    if (audioEngine.loadNextTrack(nextTrack.uri, this@PlaybackService)) {
+                                    val nextTrackPreloaded = runCatching {
+                                        val nextPlaybackUri = DlnaPlaybackCache.resolvePlaybackUri(nextTrack.uri, cacheDir)
+                                        audioEngine.loadNextTrack(nextPlaybackUri, this@PlaybackService)
+                                    }.getOrDefault(false)
+                                    if (nextTrackPreloaded) {
                                         pendingGaplessTrack = nextTrack
                                         preloaded = true
                                     }
